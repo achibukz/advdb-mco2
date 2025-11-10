@@ -1,0 +1,67 @@
+services:
+  mysql-node1:
+    image: mysql:9.4.0
+    container_name: mysql-node1
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: node1_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: rootpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_node1_data:/var/lib/mysql
+      - ./sql/node1_init:/docker-entrypoint-initdb.d
+    networks:
+      - database_network
+    restart: unless-stopped
+
+  mysql-node2:
+    image: mysql:9.4.0
+    container_name: mysql-node2
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: node2_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: rootpass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_node2_data:/var/lib/mysql
+      - ./sql/node2_init:/docker-entrypoint-initdb.d
+    networks:
+      - database_network
+    restart: unless-stopped
+
+  mysql-node3:
+    image: mysql:9.4.0
+    container_name: mysql-node3
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: node3_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: rootpass
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_node3_data:/var/lib/mysql
+      - ./sql/node3_init:/docker-entrypoint-initdb.d
+    networks:
+      - database_network
+    restart: unless-stopped
+
+
+
+
+volumes:
+  mysql_node1_data:
+    driver: local
+  mysql_node2_data:
+    driver: local
+  mysql_node3_data:
+    driver: local
+
+
+networks:
+  database_network:
+    driver: bridge
