@@ -45,6 +45,41 @@ def check_env_file():
     print()
 
 
+def check_python_version():
+    """Check if Python 3.13 is available"""
+    python_cmd = "python" if platform.system() == "Windows" else "python3"
+
+    try:
+        result = subprocess.run(
+            [python_cmd, "--version"],
+            capture_output=True,
+            text=True
+        )
+
+        version_output = result.stdout + result.stderr
+
+        # Extract version number
+        if "Python 3.13" in version_output:
+            return python_cmd
+        else:
+            print()
+            print(f"[ERROR] Python 3.13 is required, but found: {version_output.strip()}")
+            print()
+            print("Please install Python 3.13 and ensure it's in your PATH.")
+            print()
+            input("Press Enter to exit...")
+            sys.exit(1)
+
+    except FileNotFoundError:
+        print()
+        print(f"[ERROR] Python not found!")
+        print()
+        print("Please install Python 3.13 and ensure it's in your PATH.")
+        print()
+        input("Press Enter to exit...")
+        sys.exit(1)
+
+
 def get_python_command():
     """Get the appropriate Python command for the platform"""
     if platform.system() == "Windows":
@@ -80,23 +115,56 @@ def get_pip_executable():
 
 
 def create_venv():
-    """Create virtual environment"""
+    """Create virtual environment with Python 3.13"""
     venv_path = Path(".venv")
     
     if not venv_path.exists():
         print("Virtual environment not found!")
-        print("Creating virtual environment...")
-        
-        python_cmd = get_python_command()
+        print("Creating virtual environment with Python 3.13...")
+
+        python_cmd = check_python_version()
         result = subprocess.run([python_cmd, "-m", "venv", ".venv"])
-        
+
         if result.returncode != 0:
             print("Failed to create virtual environment.")
             input("Press Enter to exit...")
             sys.exit(1)
-        
-        print("Virtual environment created successfully.")
+
+        print("Virtual environment created successfully with Python 3.13.")
         print()
+    else:
+        # Verify existing venv is using Python 3.13
+        python_executable = str(get_python_executable())
+        result = subprocess.run(
+            [python_executable, "--version"],
+            capture_output=True,
+            text=True
+        )
+        version_output = result.stdout + result.stderr
+
+        if "Python 3.13" not in version_output:
+            print()
+            print(f"[WARNING] Existing virtual environment is not Python 3.13!")
+            print(f"Found: {version_output.strip()}")
+            print()
+            print("Deleting old virtual environment and creating a new one with Python 3.13...")
+
+            import shutil
+            shutil.rmtree(venv_path)
+
+            python_cmd = check_python_version()
+            result = subprocess.run([python_cmd, "-m", "venv", ".venv"])
+
+            if result.returncode != 0:
+                print("Failed to create virtual environment.")
+                input("Press Enter to exit...")
+                sys.exit(1)
+
+            print("Virtual environment created successfully with Python 3.13.")
+            print()
+        else:
+            print(f"Virtual environment already exists with Python 3.13.")
+            print()
 
 
 def install_dependencies():
