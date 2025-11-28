@@ -36,14 +36,14 @@ try:
     data = fetch_data("SELECT * FROM trans LIMIT 20", node=selected_node)
 
     if data.empty:
-        st.warning("⚠️ No data found in trans table")
+        st.warning("No data found in trans table")
     else:
-        st.success(f"✅ Retrieved {len(data)} rows from Node {selected_node}")
+        st.success(f"Retrieved {len(data)} rows from Node {selected_node}")
 
         st.write("Detailed Data:")
         st.dataframe(data, use_container_width=True)
 
 except Exception as e:
-    st.error(f"❌ Error querying database: {str(e)}")
+    st.error(f"Error querying database: {str(e)}")
     st.info("Please check your database connection settings.")
 
