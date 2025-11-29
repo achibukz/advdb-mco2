@@ -12,6 +12,7 @@ services:
     volumes:
       - mysql_node1_data:/var/lib/mysql
       - ./sql/node1_init:/docker-entrypoint-initdb.d
+      - ./sql/create_tester.sql:/docker-entrypoint-initdb.d/99-create-tester.sql
     networks:
       - database_network
     restart: unless-stopped
@@ -29,6 +30,7 @@ services:
     volumes:
       - mysql_node2_data:/var/lib/mysql
       - ./sql/node2_init:/docker-entrypoint-initdb.d
+      - ./sql/create_tester.sql:/docker-entrypoint-initdb.d/99-create-tester.sql
     networks:
       - database_network
     restart: unless-stopped
@@ -46,6 +48,7 @@ services:
     volumes:
       - mysql_node3_data:/var/lib/mysql
       - ./sql/node3_init:/docker-entrypoint-initdb.d
+      - ./sql/create_tester.sql:/docker-entrypoint-initdb.d/99-create-tester.sql
     networks:
       - database_network
     restart: unless-stopped

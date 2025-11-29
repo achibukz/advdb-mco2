@@ -54,6 +54,9 @@ docker-compose.override.yml
 *.db
 *.sqlite
 *.sqlite3
+sql/node1_init/99-create-tester.sql
+sql/node2_init/99-create-tester.sql
+sql/node3_init/99-create-tester.sql
 
 # Jupyter Notebook
 .ipynb_checkpoints
