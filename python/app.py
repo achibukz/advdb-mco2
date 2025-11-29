@@ -401,16 +401,15 @@ elif page == "Update Transaction":
             update_node = st.session_state.update_node
             
             try:
-                with st.spinner(f"Updating transaction..."):
+                with st.spinner(f"Updating transaction on Node {update_node}..."):
                     # Update on partition node
-                    execute_query(update_query, node=update_node, 
+                    result = execute_query(update_query, node=update_node, 
                                 isolation_level=isolation_level)
                     
-                    # Replicate update
-                    st.info("🔄 Replicating update to other nodes...")
-                    time.sleep(0.5)
+                with st.spinner("🔄 Replicating update to central node..."):
+                    time.sleep(0.3)
                     
-                    # Update central node
+                    # Update central node if different
                     if update_node != 1:
                         execute_query(update_query, node=1, isolation_level=isolation_level)
                 
