@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cross-platform launcher for Financial Dataset Dashboard
+Cross-platform launcher for Transaction Management
 Works on Windows, macOS, and Linux
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 def print_header():
     print("=" * 48)
-    print("Financial Dataset Dashboard Launcher")
+    print("Transaction Management Launcher")
     print("=" * 48)
     print()
 
@@ -242,7 +242,7 @@ def check_and_start_containers():
             sys.exit(1)
         
         print("Waiting for database to be ready...")
-        time.sleep(15)
+        time.sleep(5)
         print()
     else:
         print("Docker containers are already running.")
