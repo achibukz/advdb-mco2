@@ -346,6 +346,90 @@ def fetch_data(query, node, ttl=9999):
         if conn:
             conn.close()
 
+def execute_query(query, node=1, isolation_level="READ COMMITTED"):
+    """
+    Execute a write query (INSERT, UPDATE, DELETE) on specified database node
+    
+    Args:
+        query: SQL query string (INSERT, UPDATE, DELETE)
+        node: Node number (1, 2, or 3)
+        isolation_level: Transaction isolation level
+    
+    Returns:
+        Number of affected rows or True on success
+    """
+    import mysql.connector
+    
+    # Node configurations
+    node_configs = {
+        1: {
+            'host': 'localhost',
+            'port': 3306,
+            'database': 'node1_db',
+            'user': 'user',
+            'password': 'rootpass'
+        },
+        2: {
+            'host': 'localhost',
+            'port': 3307,
+            'database': 'node2_db',
+            'user': 'user',
+            'password': 'rootpass'
+        },
+        3: {
+            'host': 'localhost',
+            'port': 3308,
+            'database': 'node3_db',
+            'user': 'user',
+            'password': 'rootpass'
+        }
+    }
+    
+    config = node_configs.get(node)
+    
+    if not config:
+        raise ValueError(f"Invalid node number: {node}. Must be 1, 2, or 3.")
+    
+    conn = None
+    cursor = None
+    
+    try:
+        # Connect to MySQL
+        conn = mysql.connector.connect(**config)
+        cursor = conn.cursor()
+        
+        # Set isolation level
+        cursor.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
+        
+        # Start transaction
+        cursor.execute("START TRANSACTION")
+        
+        # Execute the query
+        cursor.execute(query)
+        
+        # Commit transaction
+        conn.commit()
+        
+        # Return affected rows count
+        affected_rows = cursor.rowcount
+        
+        return affected_rows
+        
+    except mysql.connector.Error as e:
+        if conn:
+            conn.rollback()
+        raise Exception(f"MySQL Error for Node {node}: {str(e)}")
+    
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise Exception(f"Error executing query on Node {node}: {str(e)}")
+    
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def execute_multi_statement_query(query, node=1, ttl=3600):
     """
