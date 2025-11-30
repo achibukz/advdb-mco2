@@ -2,9 +2,9 @@
 Quick Database Connection Tester - Non-Interactive
 
 Usage:
-    python quick_test.py 1       # Test local connections
-    python quick_test.py 2       # Test cloud connections
-    python quick_test.py         # Test current mode (from .env)
+    python quick_test_db.py 1       # Test local connections
+    python quick_test_db.py 2       # Test cloud connections
+    python quick_test_db.py         # Test current mode (from .env)
 """
 
 import sys
@@ -13,7 +13,7 @@ import os
 # Add parent directory to path to import db_config
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db_config import test_connection, get_node_config, USE_CLOUD_SQL
+from python.db.db_config import USE_CLOUD_SQL
 from dotenv import load_dotenv
 
 # Reload environment variables
@@ -30,7 +30,7 @@ def test_with_mode(use_cloud):
     
     # Reload db_config to pick up the change
     import importlib
-    import db_config
+    from python.db import db_config
     importlib.reload(db_config)
     
     print("\n" + "="*60)
@@ -80,8 +80,8 @@ def main():
         else:
             print(f"Invalid argument: {choice}")
             print("Usage:")
-            print("  python quick_test.py 1    # Test local connections")
-            print("  python quick_test.py 2    # Test cloud connections")
+            print("  python quick_test_db.py 1    # Test local connections")
+            print("  python quick_test_db.py 2    # Test cloud connections")
             sys.exit(1)
     else:
         # Test current mode from .env

@@ -262,7 +262,7 @@ def run_streamlit():
     python_executable = str(get_python_executable())
     
     try:
-        subprocess.run([python_executable, "-m", "streamlit", "run", "python/app.py"])
+        subprocess.run([python_executable, "-m", "streamlit", "run", "python/gui/app.py"])
     except KeyboardInterrupt:
         print("\nApplication stopped by user.")
 

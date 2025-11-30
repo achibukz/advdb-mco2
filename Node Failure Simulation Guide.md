@@ -23,7 +23,7 @@ The `fail-start.py` script simulates node failures by revoking database privileg
 ### Basic Syntax
 
 ```bash
-python fail-start.py <node_number> [<node_number> ...]
+python fail_start.py <node_number> [<node_number> ...]
 ```
 
 ### Arguments
@@ -35,13 +35,13 @@ python fail-start.py <node_number> [<node_number> ...]
 
 ```bash
 # Fail a single node
-python fail-start.py 1
+python fail_start.py 1
 
 # Fail multiple nodes
-python fail-start.py 2 3
+python fail_start.py 2 3
 
 # Fail all nodes
-python fail-start.py 1 2 3
+python fail_start.py 1 2 3
 ```
 
 ## Test Cases
@@ -53,7 +53,7 @@ python fail-start.py 1 2 3
 **Steps:**
 1. Run the failure simulation:
    ```bash
-   python fail-start.py 1
+   python fail_start.py 1
    ```
 
 2. The script will:
@@ -99,7 +99,7 @@ python fail-start.py 1 2 3
 **Steps:**
 1. Run the failure simulation:
    ```bash
-   python fail-start.py 2 3
+   python fail_start.py 2 3
    ```
 
 2. The script will:
@@ -282,25 +282,15 @@ Here's a complete workflow for testing all four cases:
 ```bash
 # Case 1: Fail Node 1
 cd python
-python fail-start.py 1
+python fail_start.py 1
 # Test your app with Node 1 offline
 # Enter 'Y' to recover (Case 2)
 
 # Case 3: Fail Nodes 2 and 3
-python fail-start.py 2 3
+python fail_start.py 2 3
 # Test your app with Nodes 2 & 3 offline
 # Enter 'Y' to recover (Case 4)
 ```
-
----
-
-## Related Files
-
-- `fail-start.py` - The failure simulation script
-- `db_config.py` - Database configuration and connection management
-- `Grant-Revoke Privileges.md` - Manual privilege management guide
-- `Docker Setup.md` - Docker configuration for multi-node setup
-
 ---
 
 ## Additional Test Scenarios
@@ -309,21 +299,21 @@ Beyond the four main test cases, you can simulate other scenarios:
 
 ### Single Node Failure (Any Node)
 ```bash
-python fail-start.py 1  # Test Case 1
-python fail-start.py 2  # Alternative scenario
-python fail-start.py 3  # Alternative scenario
+python fail_start.py 1  # Test Case 1
+python fail_start.py 2  # Alternative scenario
+python fail_start.py 3  # Alternative scenario
 ```
 
 ### Two Node Failure (Various Combinations)
 ```bash
-python fail-start.py 1 2  # Nodes 1 and 2 fail
-python fail-start.py 1 3  # Nodes 1 and 3 fail
-python fail-start.py 2 3  # Test Case 3 (Nodes 2 and 3)
+python fail_start.py 1 2  # Nodes 1 and 2 fail
+python fail_start.py 1 3  # Nodes 1 and 3 fail
+python fail_start.py 2 3  # Test Case 3 (Nodes 2 and 3)
 ```
 
 ### Complete System Failure
 ```bash
-python fail-start.py 1 2 3  # All nodes fail
+python fail_start.py 1 2 3  # All nodes fail
 ```
 
 This allows comprehensive testing of your distributed system's fault tolerance and recovery mechanisms.

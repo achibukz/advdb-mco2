@@ -2,7 +2,7 @@ import threading
 import time
 from datetime import datetime
 import pandas as pd
-from db_config import get_db_connection
+from python.db.db_config import get_db_connection
 
 class SimpleConcurrentReadTest:
     def __init__(self):

@@ -8,9 +8,8 @@ import pandas as pd
 import time
 from datetime import datetime
 import json
-import os
 
-from db_config import fetch_data, execute_query
+from python.db.db_config import fetch_data, execute_query
 
 st.set_page_config(
     page_title="Transaction Manager",
@@ -642,7 +641,7 @@ def main():
             num_transactions = st.slider(
                 "Number of Concurrent Transactions",
                 min_value=2,
-                max_value=6,
+                max_value=20,
                 value=3,
                 help="How many transactions to run simultaneously"
             )

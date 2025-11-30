@@ -5,23 +5,23 @@ This script simulates node failures by revoking database privileges from the 'us
 It can be used to test the system's behavior during node failures and recovery.
 
 Usage:
-    python fail-start.py <node_number> [<node_number> ...]
+    python fail_start.py <node_number> [<node_number> ...]
 
 Examples:
-    python fail-start.py 1          # Fail node 1
-    python fail-start.py 2          # Fail node 2
-    python fail-start.py 2 3        # Fail nodes 2 and 3
-    python fail-start.py 1 2 3      # Fail all nodes
+    python fail_start.py 1          # Fail node 1
+    python fail_start.py 2          # Fail node 2
+    python fail_start.py 2 3        # Fail nodes 2 and 3
+    python fail_start.py 1 2 3      # Fail all nodes
 
 Test Cases:
     Case 1: Fail node 1 (from node2/3 to node1 fail write transaction)
-        python fail-start.py 1
+        python fail_start.py 1
 
     Case 2: Recover node 1 (node1 comes back online)
         Input 'Y' when prompted to grant privileges back
 
     Case 3: Fail nodes 2 and 3 (from node1 to node2/3 fail write transaction)
-        python fail-start.py 2 3
+        python fail_start.py 2 3
 
     Case 4: Recover nodes 2 and 3 (node2/3 comes back online)
         Input 'Y' when prompted to grant privileges back
@@ -29,7 +29,7 @@ Test Cases:
 
 import sys
 import mysql.connector
-from db_config import get_node_config, USE_CLOUD_SQL
+from python.db.db_config import get_node_config, USE_CLOUD_SQL
 
 # Node database names mapping
 NODE_DATABASES = {
@@ -282,16 +282,16 @@ def main():
     """
     # Check command line arguments
     if len(sys.argv) < 2:
-        print("Usage: python fail-start.py <node_number> [<node_number> ...]")
+        print("Usage: python fail_start.py <node_number> [<node_number> ...]")
         print("\nExamples:")
-        print("  python fail-start.py 1       # Fail node 1")
-        print("  python fail-start.py 2       # Fail node 2")
-        print("  python fail-start.py 2 3     # Fail nodes 2 and 3")
-        print("  python fail-start.py 1 2 3   # Fail all nodes")
+        print("  python fail_start.py 1       # Fail node 1")
+        print("  python fail_start.py 2       # Fail node 2")
+        print("  python fail_start.py 2 3     # Fail nodes 2 and 3")
+        print("  python fail_start.py 1 2 3   # Fail all nodes")
         print("\nTest Cases:")
-        print("  Case 1: python fail-start.py 1       (Node 1 fails)")
+        print("  Case 1: python fail_start.py 1       (Node 1 fails)")
         print("  Case 2: Grant privileges back         (Node 1 recovers)")
-        print("  Case 3: python fail-start.py 2 3     (Nodes 2/3 fail)")
+        print("  Case 3: python fail_start.py 2 3     (Nodes 2/3 fail)")
         print("  Case 4: Grant privileges back         (Nodes 2/3 recover)")
         sys.exit(1)
 
