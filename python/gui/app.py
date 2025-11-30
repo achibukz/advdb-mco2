@@ -9,7 +9,8 @@ import time
 from datetime import datetime
 import json
 
-from python.db.db_config import fetch_data, execute_query
+from python.db.db_config import fetch_data, execute_query, get_node_config
+from python.utils.lock_manager import DistributedLockManager
 
 st.set_page_config(
     page_title="Transaction Manager",
@@ -20,6 +21,18 @@ st.set_page_config(
 # Initialize session state for transaction tracking
 if 'transaction_log' not in st.session_state:
     st.session_state.transaction_log = []
+
+# Initialize distributed lock manager
+if 'lock_manager' not in st.session_state:
+    node_configs = {
+        1: get_node_config(1),
+        2: get_node_config(2),
+        3: get_node_config(3)
+    }
+    st.session_state.lock_manager = DistributedLockManager(
+        node_configs, 
+        current_node_id="streamlit_app"
+    )
 
 # Sidebar
 st.sidebar.title("Database Operations")
@@ -305,8 +318,20 @@ def main():
             target_node = get_node_for_account(account_id)
 
             start_time = time.time()
+            lock_acquired = False
+            resource_id = "insert_trans"  # Global lock for insert operations
 
             try:
+                # Acquire distributed lock before inserting
+                with st.spinner(f"Acquiring distributed lock..."):
+                    lock_acquired = st.session_state.lock_manager.acquire_lock(
+                        resource_id, node=1, timeout=30
+                    )
+                    
+                    if not lock_acquired:
+                        st.error("Failed to acquire lock. Another user may be inserting. Please try again.")
+                        st.stop()
+
                 with st.spinner(f"Inserting transaction..."):
                     # Use a transaction to safely get and increment trans_id
                     # First, get the maximum trans_id from Node 1 (central node with all data)
@@ -383,7 +408,7 @@ def main():
 
                 log_transaction(
                     operation='INSERT',
-                    query=insert_query,
+                    query=insert_query if 'insert_query' in locals() else 'INSERT query failed before creation',
                     node=target_node,
                     isolation_level=isolation_level,
                     status='FAILED',
@@ -391,6 +416,11 @@ def main():
                 )
 
                 st.error(f"❌ Error: {str(e)}")
+            
+            finally:
+                # Always release the lock
+                if lock_acquired:
+                    st.session_state.lock_manager.release_lock(resource_id, node=1)
 
     # ============================================================================
     # UPDATE TRANSACTION (WRITE OPERATION)
@@ -464,8 +494,20 @@ def main():
         
         if update_button:
             start_time = time.time()
+            lock_acquired = False
+            resource_id = f"trans_{trans_id}"  # Lock specific to this transaction
 
             try:
+                # Acquire distributed lock before updating
+                with st.spinner(f"Acquiring distributed lock on transaction {trans_id}..."):
+                    lock_acquired = st.session_state.lock_manager.acquire_lock(
+                        resource_id, node=1, timeout=30
+                    )
+                    
+                    if not lock_acquired:
+                        st.error(f"Failed to acquire lock on transaction {trans_id}. Another user may be modifying it. Please try again.")
+                        st.stop()
+
                 with st.spinner(f"Verifying transaction exists..."):
                     # First verify the transaction exists and get account_id
                     search_query = f"SELECT * FROM trans WHERE trans_id = {trans_id}"
@@ -534,6 +576,11 @@ def main():
                 )
 
                 st.error(f"❌ Error: {str(e)}")
+            
+            finally:
+                # Always release the lock
+                if lock_acquired:
+                    st.session_state.lock_manager.release_lock(resource_id, node=1)
 
     # ============================================================================
     # DELETE TRANSACTION (WRITE OPERATION)
@@ -617,8 +664,20 @@ def main():
         if delete_button:
             start_time = time.time()
             delete_query = None
+            lock_acquired = False
+            resource_id = f"trans_{trans_id}"  # Lock specific to this transaction
 
             try:
+                # Acquire distributed lock before deleting
+                with st.spinner(f"Acquiring distributed lock on transaction {trans_id}..."):
+                    lock_acquired = st.session_state.lock_manager.acquire_lock(
+                        resource_id, node=1, timeout=30
+                    )
+                    
+                    if not lock_acquired:
+                        st.error(f"Failed to acquire lock on transaction {trans_id}. Another user may be modifying it. Please try again.")
+                        st.stop()
+
                 with st.spinner(f"Verifying transaction exists..."):
                     # First verify the transaction exists and get account_id
                     search_query = f"SELECT * FROM trans WHERE trans_id = {trans_id}"
@@ -687,6 +746,11 @@ def main():
                 )
 
                 st.error(f"❌ Error: {str(e)}")
+            
+            finally:
+                # Always release the lock
+                if lock_acquired:
+                    st.session_state.lock_manager.release_lock(resource_id, node=1)
 
     # ============================================================================
     # TRANSACTION LOG (ANALYSIS)
