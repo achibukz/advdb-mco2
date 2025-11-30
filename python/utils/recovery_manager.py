@@ -662,6 +662,70 @@ def simulate_replication_failure(target_node_id: int, source_node_id: int, sql_q
         }
 
 
+def replicate_transaction(query: str, source_node: int, target_node: int, isolation_level: str = "READ COMMITTED") -> Dict:
+    """
+    Replicate a transaction from source node to target node with recovery logging
+    
+    Args:
+        query: SQL statement to replicate
+        source_node: Node that originated the transaction
+        target_node: Node to replicate to
+        isolation_level: Transaction isolation level
+        
+    Returns:
+        Dict: Replication result with status and message
+    """
+    from python.db.db_config import get_node_config, create_dedicated_connection
+    
+    try:
+        print(f"Attempting replication: Node {source_node} -> Node {target_node}")
+        
+        # Create connection to target node
+        conn = create_dedicated_connection(target_node, isolation_level)
+        cursor = conn.cursor()
+        
+        # Execute the replication query
+        cursor.execute(query)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        print(f"Replication successful: Node {source_node} -> Node {target_node}")
+        return {
+            'status': 'success',
+            'message': f'Successfully replicated to Node {target_node}',
+            'logged': False
+        }
+        
+    except Exception as e:
+        print(f"Replication failed: Node {source_node} -> Node {target_node}: {str(e)}")
+        
+        # Log the failure for recovery
+        try:
+            # Get source node config for recovery manager
+            source_config = get_node_config(source_node)
+            recovery_manager = RecoveryManager(source_config, source_node)
+            
+            success = recovery_manager.log_backup(target_node, source_node, query)
+            
+            return {
+                'status': 'error',
+                'message': f'Replication to Node {target_node} failed: {str(e)}',
+                'error_details': str(e),
+                'logged': success,
+                'recovery_action': f'Transaction logged for recovery on Node {target_node}' if success else 'Failed to log for recovery'
+            }
+            
+        except Exception as log_error:
+            return {
+                'status': 'error', 
+                'message': f'Replication to Node {target_node} failed: {str(e)}',
+                'error_details': str(e),
+                'logged': False,
+                'recovery_action': f'Recovery logging also failed: {str(log_error)}'
+            }
+
+
 # Example usage for the 4 case studies
 if __name__ == "__main__":
     # Example database config
