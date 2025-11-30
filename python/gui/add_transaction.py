@@ -90,6 +90,9 @@ def render(get_node_for_account, log_transaction):
                 committed_count = 0
                 indices_to_remove = []
 
+                # Track which trans_ids we've already processed to avoid duplicate locking
+                processed_trans_ids = set()
+
                 # Collect indices and commit transactions
                 for txn in add_transactions:
                     idx = st.session_state.active_transactions.index(txn)
@@ -98,22 +101,54 @@ def render(get_node_for_account, log_transaction):
                     conn = st.session_state.transaction_connections[idx]
                     cursor = st.session_state.transaction_cursors[idx]
 
-                    # Commit the transaction on the target node
-                    conn.commit()
-                    cursor.close()
-                    conn.close()
+                    # Re-acquire lock for replication phase (only once per trans_id)
+                    trans_id = txn.get('trans_id')
+                    resource_id = "insert_trans"
+                    lock_acquired = False
 
-                    # Log the transaction
-                    duration = time.time() - txn['start_time']
-                    log_transaction(
-                        operation=txn['operation'],
-                        query=txn['query'],
-                        node=txn['node'],
-                        isolation_level=txn['isolation_level'],
-                        status='SUCCESS',
-                        duration=duration
-                    )
-                    committed_count += 1
+                    # Only acquire lock once per unique transaction
+                    if trans_id not in processed_trans_ids:
+                        try:
+                            lock_acquired = st.session_state.lock_manager.acquire_lock(
+                                resource_id, node=1, timeout=30
+                            )
+
+                            if not lock_acquired:
+                                st.error(f"Failed to acquire replication lock for trans_id={trans_id}")
+                                conn.rollback()
+                                cursor.close()
+                                conn.close()
+                                continue
+
+                            processed_trans_ids.add(trans_id)
+
+                            # Commit the transaction on the target node (while holding lock)
+                            conn.commit()
+                            cursor.close()
+                            conn.close()
+
+                            # Log the transaction
+                            duration = time.time() - txn['start_time']
+                            log_transaction(
+                                operation=txn['operation'],
+                                query=txn['query'],
+                                node=txn['node'],
+                                isolation_level=txn['isolation_level'],
+                                status='SUCCESS',
+                                duration=duration
+                            )
+                            committed_count += 1
+
+                        finally:
+                            # Release lock AFTER replication completes
+                            if lock_acquired:
+                                st.session_state.lock_manager.release_lock(resource_id, node=1)
+                    else:
+                        # This is a replica of an already-processed transaction
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        committed_count += 1
 
                 # Remove in reverse order to maintain correct indices
                 for idx in sorted(indices_to_remove, reverse=True):
