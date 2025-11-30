@@ -2,7 +2,7 @@ import threading
 import time
 from datetime import datetime
 import pandas as pd
-from python.db.db_config import get_db_connection
+from db.db_config import get_db_connection
 
 class SimpleConcurrentReadTest:
     def __init__(self):
@@ -244,13 +244,25 @@ def main():
             print(f"\n--- Testing with {isolation_level} ---")
             results = test.run_test(
                 query=scenario['query'],
-                num_transactions=3,
+                num_transactions=10,
                 isolation_level=isolation_level
             )
             
             # Calculate metrics for this test
             metrics = test.calculate_metrics()
             isolation_metrics[isolation_level].append(metrics)
+            
+            # Display metrics immediately after this test
+            print(f"\n{'='*60}")
+            print(f"METRICS FOR THIS TEST ({isolation_level})")
+            print(f"{'='*60}")
+            print(f"⏱️  Total Time: {metrics['total_time']:.6f} seconds")
+            print(f"✅ Successful Transactions: {metrics['successful_txns']}/{metrics['successful_txns'] + metrics['failed_txns']}")
+            print(f"❌ Failed Transactions: {metrics['failed_txns']}")
+            print(f"🚀 Throughput: {metrics['throughput']:.6f} transactions/second")
+            print(f"⏳ Avg Response Time: {metrics['avg_response_time']:.6f} seconds")
+            print(f"📊 Success Rate: {metrics['success_rate']:.2f}%")
+            print(f"{'='*60}\n")
             
             scenario_results[isolation_level] = results
             
@@ -328,47 +340,6 @@ def main():
         print("   All isolation levels perform similarly for concurrent reads.")
     else:
         print(f"\n⚠️ FINDING: {best_throughput} shows measurably better performance")
-    
-    # Make recommendation
-    print(f"\n{'='*70}")
-    print("RECOMMENDATION FOR CASE #1")
-    print(f"{'='*70}\n")
-    
-    print("✅ Recommended: READ COMMITTED")
-    print("\n📋 Reasoning:")
-    print("   1. Performance: Similar to READ UNCOMMITTED (fastest)")
-    print("   2. Safety: Prevents dirty reads (unlike READ UNCOMMITTED)")
-    print("   3. Concurrency: Allows concurrent reads efficiently")
-    print("   4. Standard: Default isolation level in most databases")
-    print("   5. Balance: Best trade-off between speed and consistency")
-    
-    print("\n⚠️  Context for Case #1:")
-    print("   - All isolation levels succeed for concurrent reads")
-    print("   - Performance differences are minimal (<5% variation)")
-    print("   - Isolation level matters MORE in Cases #2 and #3")
-    print("   - For read-only workloads, any level works well")
-    
-    # Show why NOT to use others
-    print("\n❌ Why not other levels?")
-    print("   - READ UNCOMMITTED: Allows dirty reads (unsafe)")
-    print("   - REPEATABLE READ: Unnecessary overhead for Case #1")
-    print("   - SERIALIZABLE: Slowest, overkill for read-only")
-    
-    # Final summary
-    print(f"\n{'='*70}")
-    print("FINAL SUMMARY")
-    print(f"{'='*70}\n")
-    
-    print(f"✅ Tested {len(test_scenarios)} scenarios")
-    print(f"✅ Tested {len(isolation_levels)} isolation levels")
-    print(f"✅ Total tests run: {len(test_scenarios) * len(isolation_levels)}")
-    print(f"✅ All tests passed with 100% success rate")
-    
-    print("\n📊 Key Findings:")
-    print("   1. All isolation levels handle concurrent reads successfully")
-    print("   2. Performance is nearly identical across all levels")
-    print("   3. READ COMMITTED offers best balance for production use")
-    print("   4. No deadlocks or conflicts observed in any test")
 
 if __name__ == "__main__":
     main()
