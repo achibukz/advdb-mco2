@@ -20,6 +20,12 @@ st.set_page_config(
 # Initialize session state for transaction tracking
 if 'transaction_log' not in st.session_state:
     st.session_state.transaction_log = []
+if 'active_transactions' not in st.session_state:
+    st.session_state.active_transactions = []  # Changed to list to support multiple pending transactions
+if 'transaction_connections' not in st.session_state:
+    st.session_state.transaction_connections = []  # List of open connections
+if 'transaction_cursors' not in st.session_state:
+    st.session_state.transaction_cursors = []  # List of open cursors
 
 # Sidebar
 st.sidebar.title("Database Operations")
@@ -176,43 +182,145 @@ def main():
             background-color: #3A4A3A;
             border-color: #3A4A3A;
         }
+        /* Rollback button styling */
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")) {
+            background-color: #692727 !important;
+            border-color: #692727 !important;
+        }
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")):hover {
+            background-color: #531F1F !important;
+            border-color: #531F1F !important;
+        }
         </style>
         """, unsafe_allow_html=True)
         
-        btn_col1, btn_col2 = st.columns(2)
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
             fetch_button = st.button("🔍 Fetch Data", type="primary", use_container_width=True)
         with btn_col2:
             commit_button = st.button("✅ Commit Transaction", type="secondary", use_container_width=True, key="commit_read")
+        with btn_col3:
+            rollback_button = st.button("↩️ Rollback", type="secondary", use_container_width=True, key="rollback_read")
         
         if commit_button:
-            st.success("✅ Transaction committed!")
-            st.toast("Transaction committed successfully")
+            view_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'view']
+            if view_transactions:
+                try:
+                    committed_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and commit transactions
+                    for txn in view_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        
+                        # Commit the transaction
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        
+                        # Log the transaction
+                        duration = time.time() - txn['start_time']
+                        log_transaction(
+                            operation=txn['operation'],
+                            query=txn['query'],
+                            node=txn['node'],
+                            isolation_level=txn['isolation_level'],
+                            status='SUCCESS',
+                            duration=duration
+                        )
+                        committed_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.success(f"✅ {committed_count} transaction(s) committed!")
+                    st.toast(f"{committed_count} transaction(s) committed successfully")
+                except Exception as e:
+                    st.error(f"Commit failed: {str(e)}")
+            else:
+                st.warning("No active READ transaction to commit")
+        
+        if rollback_button:
+            view_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'view']
+            if view_transactions:
+                try:
+                    rolled_back_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and rollback transactions
+                    for txn in view_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        conn.rollback()
+                        cursor.close()
+                        conn.close()
+                        rolled_back_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.info(f"↩️ {rolled_back_count} transaction(s) rolled back - no changes logged")
+                    st.toast(f"{rolled_back_count} transaction(s) rolled back")
+                except Exception as e:
+                    st.error(f"Rollback failed: {str(e)}")
+            else:
+                st.warning("No active READ transaction to rollback")
         
         if fetch_button:
             start_time = time.time()
 
             try:
-                with st.spinner(f"Querying database..."):
-                    # Execute query (node is automatically selected)
-                    data = fetch_data(base_query, node=selected_node)
+                from python.db.db_config import create_dedicated_connection
+                
+                with st.spinner(f"Starting transaction on Node {selected_node}..."):
+                    # Create dedicated connection and start transaction
+                    conn = create_dedicated_connection(selected_node, isolation_level)
+                    cursor = conn.cursor(dictionary=True)
+                    
+                    # Set isolation level and start transaction
+                    cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                    cursor.execute("START TRANSACTION")
+                    
+                    # Execute query
+                    cursor.execute(base_query)
+                    results = cursor.fetchall()
+                    data = pd.DataFrame(results)
+                    
+                    # Append connection and transaction to lists
+                    st.session_state.transaction_connections.append(conn)
+                    st.session_state.transaction_cursors.append(cursor)
+                    st.session_state.active_transactions.append({
+                        'page': 'view',
+                        'node': selected_node,
+                        'operation': 'READ',
+                        'query': base_query,
+                        'isolation_level': isolation_level,
+                        'start_time': start_time,
+                        'data': data.copy()  # Store the fetched data
+                    })
 
                 duration = time.time() - start_time
 
-                # Log this READ operation
-                log_transaction(
-                    operation='READ',
-                    query=base_query,
-                    node=selected_node,
-                    isolation_level=isolation_level,
-                    status='SUCCESS',
-                    duration=duration
-                )
+                # DON'T log yet - will log when user commits
 
                 if data.empty:
                     st.warning("⚠️ No data found matching your criteria")
                 else:
                     st.success(f"✅ Retrieved {len(data)} rows in {duration:.3f}s")
+                    st.warning("⏳ Transaction active - Click 'Commit' to finalize or 'Rollback' to cancel")
                     st.dataframe(data, use_container_width=True)
 
                     # Show transaction info
@@ -220,20 +328,11 @@ def main():
                         st.write(f"**Isolation Level**: {isolation_level}")
                         st.write(f"**Duration**: {duration:.3f}s")
                         st.write(f"**Timestamp**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        st.write(f"**Transaction Status**: ACTIVE (not committed)")
                         st.caption(f"System selected Node {selected_node} for this query")
 
             except Exception as e:
-                duration = time.time() - start_time
-
-                log_transaction(
-                    operation='READ',
-                    query=base_query,
-                    node=selected_node,
-                    isolation_level=isolation_level,
-                    status='FAILED',
-                    duration=duration
-                )
-
+                # Don't log failed transactions - only log successful commits
                 st.error(f"❌ Error: {str(e)}")
 
     # ============================================================================
@@ -286,51 +385,132 @@ def main():
             background-color: #3A4A3A;
             border-color: #3A4A3A;
         }
+        /* Rollback button styling */
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")) {
+            background-color: #692727 !important;
+            border-color: #692727 !important;
+        }
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")):hover {
+            background-color: #531F1F !important;
+            border-color: #531F1F !important;
+        }
         </style>
         """, unsafe_allow_html=True)
         
-        btn_col1, btn_col2 = st.columns(2)
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
             insert_button = st.button("💾 Insert Transaction", type="primary", use_container_width=True)
         with btn_col2:
             commit_button = st.button("✅ Commit Transaction", type="secondary", use_container_width=True, key="commit_insert")
+        with btn_col3:
+            rollback_button = st.button("↩️ Rollback", type="secondary", use_container_width=True, key="rollback_insert")
         
         if commit_button:
-            st.success("✅ Transaction committed!")
-            st.toast("Transaction committed successfully")
+            add_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'add']
+            if add_transactions:
+                try:
+                    committed_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and commit transactions
+                    for txn in add_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        
+                        # Commit the transaction
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        
+                        # Log the transaction
+                        duration = time.time() - txn['start_time']
+                        log_transaction(
+                            operation=txn['operation'],
+                            query=txn['query'],
+                            node=txn['node'],
+                            isolation_level=txn['isolation_level'],
+                            status='SUCCESS',
+                            duration=duration
+                        )
+                        committed_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.success(f"✅ {committed_count} transaction(s) committed and replicated!")
+                    st.toast(f"{committed_count} transaction(s) committed successfully")
+                except Exception as e:
+                    st.error(f"Commit failed: {str(e)}")
+            else:
+                st.warning("No active INSERT transaction to commit")
+        
+        if rollback_button:
+            add_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'add']
+            if add_transactions:
+                try:
+                    rolled_back_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and rollback transactions
+                    for txn in add_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        conn.rollback()
+                        cursor.close()
+                        conn.close()
+                        rolled_back_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.info(f"↩️ {rolled_back_count} insert transaction(s) rolled back - no changes made or logged")
+                    st.toast(f"{rolled_back_count} transaction(s) rolled back")
+                except Exception as e:
+                    st.error(f"Rollback failed: {str(e)}")
+            else:
+                st.warning("No active INSERT transaction to rollback")
         
         if insert_button:
-
+            from python.db.db_config import create_dedicated_connection
+            
             # Determine target node based on account_id
             target_node = get_node_for_account(account_id)
 
             start_time = time.time()
 
             try:
-                with st.spinner(f"Inserting transaction..."):
-                    # Use a transaction to safely get and increment trans_id
-                    # First, get the maximum trans_id from Node 1 (central node with all data)
-                    # Using FOR UPDATE to lock the rows during the transaction (if supported)
+                with st.spinner(f"Starting transaction on Node {target_node}..."):
+                    # Create dedicated connection and start transaction
+                    conn = create_dedicated_connection(target_node, isolation_level)
+                    cursor = conn.cursor(dictionary=True)
+                    
+                    # Set isolation level and start transaction
+                    cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                    cursor.execute("START TRANSACTION")
+                    
+                    # Get the maximum trans_id using the INSERT transaction's own connection
+                    # This ensures we see all committed data and avoid race conditions
                     max_id_query = "SELECT COALESCE(MAX(trans_id), 0) as max_id FROM trans"
-                    max_id_result = fetch_data(max_id_query, node=1)
+                    cursor.execute(max_id_query)
+                    max_id_result = cursor.fetchone()
 
                     # Get the next trans_id
-                    if not max_id_result.empty:
-                        next_trans_id = int(max_id_result['max_id'].iloc[0]) + 1
+                    if max_id_result and max_id_result['max_id'] is not None:
+                        next_trans_id = int(max_id_result['max_id']) + 1
                     else:
                         next_trans_id = 1
-
-                    # Verify that trans_id doesn't exist (double-check for race conditions)
-                    check_query = f"SELECT COUNT(*) as count FROM trans WHERE trans_id = {next_trans_id}"
-                    check_result = fetch_data(check_query, node=1)
-
-                    # If trans_id already exists, retry with incremented value
-                    retry_count = 0
-                    while not check_result.empty and check_result['count'].iloc[0] > 0 and retry_count < 10:
-                        next_trans_id += 1
-                        check_query = f"SELECT COUNT(*) as count FROM trans WHERE trans_id = {next_trans_id}"
-                        check_result = fetch_data(check_query, node=1)
-                        retry_count += 1
 
                     # Build INSERT query with trans_id
                     insert_query = f"""
@@ -338,58 +518,46 @@ def main():
                     VALUES ({next_trans_id}, {account_id}, '{trans_date}', '{trans_type}', '{operation}', {amount}, '{k_symbol}')
                     """
 
-                    # Execute insert on partition node
-                    result = execute_query(insert_query, node=target_node,
-                                         isolation_level=isolation_level)
-
-                    # Simulate replication to other nodes
-                    st.info("🔄 Replicating to other nodes...")
-                    time.sleep(0.5)  # Simulate replication delay
-
-                    # Replicate to Node 1 (central node)
-                    if target_node != 1:
-                        execute_query(insert_query, node=1, isolation_level=isolation_level)
-
-                    # If insert was on Node 1, replicate to partition node
-                    if target_node == 1:
-                        replica_node = get_node_for_account(account_id)
-                        if replica_node != 1:
-                            execute_query(insert_query, node=replica_node, isolation_level=isolation_level)
+                    # Execute insert but don't commit yet
+                    cursor.execute(insert_query)
+                    
+                    # Append connection and transaction to lists
+                    st.session_state.transaction_connections.append(conn)
+                    st.session_state.transaction_cursors.append(cursor)
+                    st.session_state.active_transactions.append({
+                        'page': 'add',
+                        'node': target_node,
+                        'operation': 'INSERT',
+                        'trans_id': next_trans_id,
+                        'query': insert_query,
+                        'isolation_level': isolation_level,
+                        'account_id': account_id,
+                        'start_time': start_time
+                    })
 
                 duration = time.time() - start_time
 
-                # Log the WRITE operation
-                log_transaction(
-                    operation='INSERT',
-                    query=insert_query,
-                    node=target_node,
-                    isolation_level=isolation_level,
-                    status='SUCCESS',
-                    duration=duration
-                )
+                # DON'T log yet - will log when user commits
 
-                st.success(f"✅ Transaction inserted successfully with trans_id={next_trans_id} in {duration:.3f}s")
-                st.success("✅ Replicated to other nodes")
+                st.success(f"✅ Transaction prepared with trans_id={next_trans_id} in {duration:.3f}s")
+                st.warning("⏳ Transaction active - Click 'Commit' to save or 'Rollback' to cancel")
 
-                # Show inserted data
-                with st.expander("📝 View Inserted Record"):
-                    verify_query = f"SELECT * FROM trans WHERE trans_id = {next_trans_id}"
-                    inserted_data = fetch_data(verify_query, node=target_node)
-                    st.dataframe(inserted_data)
-                    st.caption(f"Data inserted into Node {target_node} and replicated to central node")
+                # Show inserted data preview
+                with st.expander("📝 Preview Pending Insert"):
+                    preview_data = pd.DataFrame([{
+                        'trans_id': next_trans_id,
+                        'account_id': account_id,
+                        'newdate': trans_date,
+                        'type': trans_type,
+                        'operation': operation,
+                        'amount': amount,
+                        'k_symbol': k_symbol
+                    }])
+                    st.dataframe(preview_data)
+                    st.caption(f"Transaction prepared on Node {target_node} (not yet committed)")
 
             except Exception as e:
-                duration = time.time() - start_time
-
-                log_transaction(
-                    operation='INSERT',
-                    query=insert_query,
-                    node=target_node,
-                    isolation_level=isolation_level,
-                    status='FAILED',
-                    duration=duration
-                )
-
+                # Don't log failed transactions - only log successful commits
                 st.error(f"❌ Error: {str(e)}")
 
     # ============================================================================
@@ -449,20 +617,106 @@ def main():
             background-color: #3A4A3A;
             border-color: #3A4A3A;
         }
+        /* Rollback button styling */
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")) {
+            background-color: #692727 !important;
+            border-color: #692727 !important;
+        }
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")):hover {
+            background-color: #531F1F !important;
+            border-color: #531F1F !important;
+        }
         </style>
         """, unsafe_allow_html=True)
         
-        btn_col1, btn_col2 = st.columns(2)
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
             update_button = st.button("💾 Update Transaction", type="primary", use_container_width=True)
         with btn_col2:
             commit_button = st.button("✅ Commit Transaction", type="secondary", use_container_width=True, key="commit_update")
+        with btn_col3:
+            rollback_button = st.button("↩️ Rollback", type="secondary", use_container_width=True, key="rollback_update")
         
         if commit_button:
-            st.success("✅ Transaction committed!")
-            st.toast("Transaction committed successfully")
+            update_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'update']
+            if update_transactions:
+                try:
+                    committed_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and commit transactions
+                    for txn in update_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        
+                        # Commit the transaction
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        
+                        # Log the transaction
+                        duration = time.time() - txn['start_time']
+                        log_transaction(
+                            operation=txn['operation'],
+                            query=txn['query'],
+                            node=txn['node'],
+                            isolation_level=txn['isolation_level'],
+                            status='SUCCESS',
+                            duration=duration
+                        )
+                        committed_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.success(f"✅ {committed_count} update transaction(s) committed and replicated!")
+                    st.toast(f"{committed_count} transaction(s) committed successfully")
+                except Exception as e:
+                    st.error(f"Commit failed: {str(e)}")
+            else:
+                st.warning("No active UPDATE transaction to commit")
+        
+        if rollback_button:
+            update_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'update']
+            if update_transactions:
+                try:
+                    rolled_back_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and rollback transactions
+                    for txn in update_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        conn.rollback()
+                        cursor.close()
+                        conn.close()
+                        rolled_back_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.info(f"↩️ {rolled_back_count} update transaction(s) rolled back - original data restored, no changes logged")
+                    st.toast(f"{rolled_back_count} transaction(s) rolled back")
+                except Exception as e:
+                    st.error(f"Rollback failed: {str(e)}")
+            else:
+                st.warning("No active UPDATE transaction to rollback")
         
         if update_button:
+            from python.db.db_config import create_dedicated_connection
+            
             start_time = time.time()
 
             try:
@@ -476,7 +730,7 @@ def main():
                     else:
                         # Get account_id to determine target partition node
                         account_id = int(found_data.iloc[0]['account_id'])
-                        target_node = get_node_for_account(account_id)
+                        target_node = 1  # Always update on Node 1 (central node)
 
                         # Build UPDATE query
                         update_query = f"""
@@ -487,52 +741,51 @@ def main():
                         WHERE trans_id = {trans_id}
                         """
 
-                        with st.spinner(f"Updating transaction on Node 1 (central node)..."):
-                            # Execute update on Node 1 first (central node)
-                            result = execute_query(update_query, node=1,
-                                                 isolation_level=isolation_level)
-
-                        # Simulate replication to partition node
-                        st.info("🔄 Replicating to partition node...")
-                        time.sleep(0.5)  # Simulate replication delay
-
-                        # Replicate to partition node (Node 2 or Node 3)
-                        if target_node != 1:
-                            execute_query(update_query, node=target_node, isolation_level=isolation_level)
+                        with st.spinner(f"Starting transaction on Node 1..."):
+                            # Create dedicated connection and start transaction
+                            conn = create_dedicated_connection(target_node, isolation_level)
+                            cursor = conn.cursor(dictionary=True)
+                            
+                            # Set isolation level and start transaction
+                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                            cursor.execute("START TRANSACTION")
+                            
+                            # Execute update but don't commit yet
+                            cursor.execute(update_query)
+                            
+                            # Append connection and transaction to lists
+                            st.session_state.transaction_connections.append(conn)
+                            st.session_state.transaction_cursors.append(cursor)
+                            st.session_state.active_transactions.append({
+                                'page': 'update',
+                                'node': target_node,
+                                'operation': 'UPDATE',
+                                'trans_id': trans_id,
+                                'query': update_query,
+                                'isolation_level': isolation_level,
+                                'start_time': start_time
+                            })
 
                         duration = time.time() - start_time
 
-                        log_transaction(
-                            operation='UPDATE',
-                            query=update_query,
-                            node=1,  # Primary update on Node 1
-                            isolation_level=isolation_level,
-                            status='SUCCESS',
-                            duration=duration
-                        )
+                        # DON'T log yet - will log when user commits
 
-                        st.success(f"✅ Transaction updated successfully in {duration:.3f}s")
-                        st.success(f"✅ Replicated to Node {target_node}")
+                        st.success(f"✅ Update transaction prepared in {duration:.3f}s")
+                        st.warning("⏳ Transaction active - Click 'Commit' to save or 'Rollback' to undo")
 
-                        # Show updated data
-                        with st.expander("📝 View Updated Record"):
-                            verify_query = f"SELECT * FROM trans WHERE trans_id = {trans_id}"
-                            updated_data = fetch_data(verify_query, node=1)
-                            st.dataframe(updated_data)
-                            st.caption(f"Data updated on Node 1 and replicated to Node {target_node}")
+                        # Show updated data preview
+                        with st.expander("📝 Preview Pending Update"):
+                            preview_data = pd.DataFrame([{
+                                'trans_id': trans_id,
+                                'new_amount': new_amount,
+                                'new_type': new_type,
+                                'new_operation': new_operation
+                            }])
+                            st.dataframe(preview_data)
+                            st.caption(f"Update prepared on Node 1 (not yet committed)")
 
             except Exception as e:
-                duration = time.time() - start_time
-
-                log_transaction(
-                    operation='UPDATE',
-                    query=update_query if 'update_query' in locals() else f"UPDATE trans WHERE trans_id = {trans_id}",
-                    node=1,
-                    isolation_level=isolation_level,
-                    status='FAILED',
-                    duration=duration
-                )
-
+                # Don't log failed transactions - only log successful commits
                 st.error(f"❌ Error: {str(e)}")
 
     # ============================================================================
@@ -601,20 +854,106 @@ def main():
             background-color: #3A4A3A;
             border-color: #3A4A3A;
         }
+        /* Rollback button styling */
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")) {
+            background-color: #692727 !important;
+            border-color: #692727 !important;
+        }
+        button[data-testid="baseButton-secondary"]:has(p:contains("Rollback")):hover {
+            background-color: #531F1F !important;
+            border-color: #531F1F !important;
+        }
         </style>
         """, unsafe_allow_html=True)
         
-        btn_col1, btn_col2 = st.columns(2)
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
             delete_button = st.button("🗑️ Delete Transaction", type="primary", use_container_width=True)
         with btn_col2:
             commit_button = st.button("✅ Commit Transaction", type="secondary", use_container_width=True, key="commit_delete")
+        with btn_col3:
+            rollback_button = st.button("↩️ Rollback", type="secondary", use_container_width=True, key="rollback_delete")
         
         if commit_button:
-            st.success("✅ Transaction committed!")
-            st.toast("Transaction committed successfully")
+            delete_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'delete']
+            if delete_transactions:
+                try:
+                    committed_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and commit transactions
+                    for txn in delete_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        
+                        # Commit the transaction
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        
+                        # Log the transaction
+                        duration = time.time() - txn['start_time']
+                        log_transaction(
+                            operation=txn['operation'],
+                            query=txn['query'],
+                            node=txn['node'],
+                            isolation_level=txn['isolation_level'],
+                            status='SUCCESS',
+                            duration=duration
+                        )
+                        committed_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.success(f"✅ {committed_count} delete transaction(s) committed and replicated!")
+                    st.toast(f"{committed_count} transaction(s) committed successfully")
+                except Exception as e:
+                    st.error(f"Commit failed: {str(e)}")
+            else:
+                st.warning("No active DELETE transaction to commit")
+        
+        if rollback_button:
+            delete_transactions = [t for t in st.session_state.active_transactions if t.get('page') == 'delete']
+            if delete_transactions:
+                try:
+                    rolled_back_count = 0
+                    indices_to_remove = []
+                    
+                    # Collect indices and rollback transactions
+                    for txn in delete_transactions:
+                        idx = st.session_state.active_transactions.index(txn)
+                        indices_to_remove.append(idx)
+                        
+                        conn = st.session_state.transaction_connections[idx]
+                        cursor = st.session_state.transaction_cursors[idx]
+                        conn.rollback()
+                        cursor.close()
+                        conn.close()
+                        rolled_back_count += 1
+                    
+                    # Remove in reverse order to maintain correct indices
+                    for idx in sorted(indices_to_remove, reverse=True):
+                        del st.session_state.active_transactions[idx]
+                        del st.session_state.transaction_connections[idx]
+                        del st.session_state.transaction_cursors[idx]
+                    
+                    st.info(f"↩️ {rolled_back_count} delete transaction(s) rolled back - data not deleted, no changes logged")
+                    st.toast(f"{rolled_back_count} transaction(s) rolled back")
+                except Exception as e:
+                    st.error(f"Rollback failed: {str(e)}")
+            else:
+                st.warning("No active DELETE transaction to rollback")
         
         if delete_button:
+            from python.db.db_config import create_dedicated_connection
+            
             start_time = time.time()
             delete_query = None
 
@@ -632,60 +971,51 @@ def main():
                     else:
                         # Get account_id to determine target partition node
                         account_id = int(found_data.iloc[0]['account_id'])
-                        target_node = get_node_for_account(account_id)
+                        target_node = 1  # Always delete from Node 1 (central node)
 
                         # Build DELETE query
                         delete_query = f"DELETE FROM trans WHERE trans_id = {trans_id}"
 
-                        with st.spinner(f"Deleting transaction from Node 1 (central node)..."):
-                            # Execute delete on Node 1 first (central node)
-                            result = execute_query(delete_query, node=1,
-                                                 isolation_level=isolation_level)
-
-                        # Simulate replication to partition node
-                        st.info("🔄 Replicating deletion to partition node...")
-                        time.sleep(0.5)  # Simulate replication delay
-
-                        # Replicate to partition node (Node 2 or Node 3)
-                        if target_node != 1:
-                            execute_query(delete_query, node=target_node, isolation_level=isolation_level)
+                        with st.spinner(f"Starting transaction on Node 1..."):
+                            # Create dedicated connection and start transaction
+                            conn = create_dedicated_connection(target_node, isolation_level)
+                            cursor = conn.cursor(dictionary=True)
+                            
+                            # Set isolation level and start transaction
+                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                            cursor.execute("START TRANSACTION")
+                            
+                            # Execute delete but don't commit yet
+                            cursor.execute(delete_query)
+                            
+                            # Append connection and transaction to lists
+                            st.session_state.transaction_connections.append(conn)
+                            st.session_state.transaction_cursors.append(cursor)
+                            st.session_state.active_transactions.append({
+                                'page': 'delete',
+                                'node': target_node,
+                                'operation': 'DELETE',
+                                'trans_id': trans_id,
+                                'query': delete_query,
+                                'isolation_level': isolation_level,
+                                'start_time': start_time
+                            })
 
                         duration = time.time() - start_time
 
-                        log_transaction(
-                            operation='DELETE',
-                            query=delete_query,
-                            node=1,  # Primary delete on Node 1
-                            isolation_level=isolation_level,
-                            status='SUCCESS',
-                            duration=duration
-                        )
+                        # DON'T log yet - will log when user commits
 
-                        st.success(f"✅ Transaction deleted successfully in {duration:.3f}s")
-                        st.success(f"✅ Deletion replicated to Node {target_node}")
+                        st.success(f"✅ Delete transaction prepared in {duration:.3f}s")
+                        st.warning("⏳ Transaction active - Click 'Commit' to finalize deletion or 'Rollback' to cancel")
 
                         # Show confirmation
-                        st.info(f"🗑️ Transaction {trans_id} has been removed from all nodes")
-
-                        # Store the deleted ID and trigger a rerun to clear the form
-                        st.session_state.last_deleted_id = trans_id
-                        if 'preview_trans_id' in st.session_state:
-                            del st.session_state.preview_trans_id
-                        time.sleep(1.5)  # Brief pause to show success messages
-                        st.rerun()
+                        with st.expander("📝 Pending Deletion"):
+                            st.write(f"Transaction ID {trans_id} is marked for deletion")
+                            st.dataframe(found_data)
+                            st.caption(f"Delete prepared on Node 1 (not yet committed)")
 
             except Exception as e:
-                duration = time.time() - start_time
-
-                log_transaction(
-                    operation='DELETE',
-                    query=delete_query if delete_query else f"DELETE FROM trans WHERE trans_id = {trans_id}",
-                    node=1,
-                    isolation_level=isolation_level,
-                    status='FAILED',
-                    duration=duration
-                )
-
+                # Don't log failed transactions - only log successful commits
                 st.error(f"❌ Error: {str(e)}")
 
     # ============================================================================
