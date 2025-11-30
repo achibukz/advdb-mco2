@@ -135,7 +135,7 @@ STREAMLIT_CONN_NAMES = {
 }
 
 
-def _generate_cache_key(query, node=1):
+def _generate_cache_key(query, node):
     """
     Generate a unique cache key for a query and node combination.
 
@@ -174,7 +174,7 @@ def _is_cache_valid(cache_entry):
     return age < CACHE_TTL_SECONDS
 
 
-def get_node_config(node=1):
+def get_node_config(node):
     """
     Get the configuration for a specific node.
 
@@ -194,7 +194,7 @@ def get_node_config(node=1):
     return NODE_CONFIGS[node][config_type]
 
 
-def get_db_connection(node=1):
+def get_db_connection(node):
     """
     Establish and return a database connection for a specific node.
 
@@ -346,7 +346,7 @@ def fetch_data(query, node, ttl=9999):
         if conn:
             conn.close()
 
-def execute_query(query, node=1, isolation_level="READ COMMITTED"):
+def execute_query(query, node, isolation_level="READ COMMITTED"):
     """
     Execute a write query (INSERT, UPDATE, DELETE) on specified database node
     
@@ -431,7 +431,7 @@ def execute_query(query, node=1, isolation_level="READ COMMITTED"):
         if conn:
             conn.close()
 
-def execute_multi_statement_query(query, node=1, ttl=3600):
+def execute_multi_statement_query(query, node, ttl=3600):
     """
     Execute a multi-statement SQL query and return the final SELECT results from a specific node.
     Useful for queries that create temporary tables before selecting data.
@@ -562,7 +562,7 @@ def execute_multi_statement_query(query, node=1, ttl=3600):
                 pass
 
 
-def test_connection(node=1):
+def test_connection(node):
     """
     Test the database connection for a specific node.
 
