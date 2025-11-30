@@ -55,6 +55,29 @@ CREATE TABLE `distributed_lock` (
   INDEX `idx_locked_by` (`locked_by`),
   INDEX `idx_lock_time` (`lock_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+--
+-- Table structure for table `recovery_log`
+--
+
+DROP TABLE IF EXISTS recovery_log;
+CREATE TABLE recovery_log (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    target_node INT NOT NULL,
+    source_node INT NOT NULL,
+    sql_statement TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status ENUM('PENDING', 'COMPLETED', 'FAILED') DEFAULT 'PENDING',
+    retry_count INT DEFAULT 0,
+    error_message TEXT NULL,
+    transaction_hash VARCHAR(64) NOT NULL,
+    
+    INDEX idx_target_node (target_node),
+    INDEX idx_status (status),
+    INDEX idx_timestamp (timestamp),
+    INDEX idx_transaction_hash (transaction_hash)
+) ENGINE=InnoDB;
+
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 LOCK TABLES `trans` WRITE;
