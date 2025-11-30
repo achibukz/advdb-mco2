@@ -357,8 +357,8 @@ def main():
         st.title("Add New Transaction (Write Operation)")
 
         st.markdown("""
-        Insert a new transaction record. The system will automatically route it to the 
-        appropriate node and handle replication.
+        Insert a new transaction record. The system queries all available nodes to find the 
+        highest trans_id and automatically routes the insert to the appropriate node.
         """)
 
         # Configuration
@@ -440,25 +440,7 @@ def main():
                         cursor.close()
                         conn.close()
                         
-                        # Replicate to other nodes
-                        insert_query = txn['query']
-                        target_node = txn['node']
-                        account_id = txn['account_id']
-                        
-                        # Simulate replication to other nodes
-                        st.info("🔄 Replicating to other nodes...")
-                        time.sleep(0.5)  # Simulate replication delay
-                        
-                        # Replicate to Node 1 (central node)
-                        if target_node != 1:
-                            execute_query(insert_query, node=1, isolation_level=txn['isolation_level'])
-                        
-                        # If insert was on Node 1, replicate to partition node
-                        if target_node == 1:
-                            replica_node = get_node_for_account(account_id)
-                            if replica_node != 1:
-                                execute_query(insert_query, node=replica_node, isolation_level=txn['isolation_level'])
-                        
+
                         # Log the transaction
                         duration = time.time() - txn['start_time']
                         log_transaction(
@@ -477,7 +459,7 @@ def main():
                         del st.session_state.transaction_connections[idx]
                         del st.session_state.transaction_cursors[idx]
                     
-                    st.success(f"✅ {committed_count} transaction(s) committed and replicated!")
+                    st.success(f"✅ {committed_count} transaction(s) committed successfully!")
                     st.toast(f"{committed_count} transaction(s) committed successfully")
                 except Exception as e:
                     st.error(f"Commit failed: {str(e)}")
@@ -517,7 +499,7 @@ def main():
                 st.warning("No active INSERT transaction to rollback")
         
         if insert_button:
-            from python.db.db_config import create_dedicated_connection
+            from python.db.db_config import create_dedicated_connection, get_max_trans_id_multi_node
 
             # Determine target node based on account_id
             target_node = get_node_for_account(account_id)
@@ -537,6 +519,41 @@ def main():
                         st.error("Failed to acquire lock. Another user may be inserting. Please try again.")
                         st.stop()
 
+                with st.spinner(f"Checking all nodes for highest trans_id..."):
+                    # Query all available nodes for MAX(trans_id) and get the highest value
+                    max_result = get_max_trans_id_multi_node()
+
+                    if max_result['status'] == 'failed':
+                        st.error(f"❌ Cannot proceed: {max_result['error']}")
+                        st.warning("⚠️ Servers are down. Please check node availability and try again.")
+
+                        # Show node status
+                        with st.expander("📊 Node Status"):
+                            status_data = []
+                            for node in [1, 2, 3]:
+                                is_available = node in max_result['available_nodes']
+                                status_data.append({
+                                    'Node': f"Node {node}",
+                                    'Status': '✅ Available' if is_available else '❌ Down'
+                                })
+                            st.dataframe(pd.DataFrame(status_data))
+                        st.stop()
+
+                    # Get the next trans_id from the highest value across all nodes
+                    next_trans_id = max_result['max_trans_id'] + 1
+
+                    # Show which nodes were queried
+                    with st.expander("📊 Multi-Node Query Results"):
+                        st.info(f"Queried {len(max_result['available_nodes'])} available node(s)")
+                        node_data = []
+                        for node, value in max_result['node_values'].items():
+                            node_data.append({
+                                'Node': f"Node {node}",
+                                'MAX(trans_id)': value if value is not None else 'N/A'
+                            })
+                        st.dataframe(pd.DataFrame(node_data))
+                        st.success(f"Selected highest trans_id: {max_result['max_trans_id']} → Next: {next_trans_id}")
+
                 with st.spinner(f"Preparing insert transaction..."):
                     # Create dedicated connection and start transaction
                     conn = create_dedicated_connection(target_node, isolation_level)
@@ -545,46 +562,46 @@ def main():
                     # Set isolation level and start transaction
                     cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
                     cursor.execute("START TRANSACTION")
-                    
-                    # Get the next trans_id using this transaction's own cursor
-                    max_id_query = "SELECT COALESCE(MAX(trans_id), 0) as max_id FROM trans"
-                    cursor.execute(max_id_query)
-                    max_id_result = cursor.fetchone()
 
-                    # Get the next trans_id
-                    if max_id_result:
-                        next_trans_id = int(max_id_result['max_id']) + 1
-                    else:
-                        next_trans_id = 1
-
-                    # Build INSERT query with trans_id
+                    # Build INSERT query with trans_id (already determined from multi-node query)
                     insert_query = f"""
                     INSERT INTO trans (trans_id, account_id, newdate, type, operation, amount, k_symbol)
                     VALUES ({next_trans_id}, {account_id}, '{trans_date}', '{trans_type}', '{operation}', {amount}, '{k_symbol}')
                     """
 
-                    # Execute insert but don't commit yet
-                    cursor.execute(insert_query)
-                    
-                    # Append connection and transaction to lists
-                    st.session_state.transaction_connections.append(conn)
-                    st.session_state.transaction_cursors.append(cursor)
-                    st.session_state.active_transactions.append({
-                        'page': 'add',
-                        'node': target_node,
-                        'operation': 'INSERT',
-                        'query': insert_query,
-                        'isolation_level': isolation_level,
-                        'start_time': start_time,
-                        'trans_id': next_trans_id,
-                        'account_id': account_id
-                    })
+                    # Prepare transactions on both Node 1 and Node 2
+                    nodes_to_write = [1, 2]
+
+                    for node in nodes_to_write:
+                        conn_temp = create_dedicated_connection(node, isolation_level)
+                        cursor_temp = conn_temp.cursor(dictionary=True)
+
+                        # Set isolation level and start transaction
+                        cursor_temp.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                        cursor_temp.execute("START TRANSACTION")
+
+                        # Execute insert but don't commit yet
+                        cursor_temp.execute(insert_query)
+
+                        # Append connection and transaction to lists
+                        st.session_state.transaction_connections.append(conn_temp)
+                        st.session_state.transaction_cursors.append(cursor_temp)
+                        st.session_state.active_transactions.append({
+                            'page': 'add',
+                            'node': node,
+                            'operation': 'INSERT',
+                            'query': insert_query,
+                            'isolation_level': isolation_level,
+                            'start_time': start_time,
+                            'trans_id': next_trans_id,
+                            'account_id': account_id
+                        })
 
                 duration = time.time() - start_time
 
                 # DON'T log yet - will log when user commits
 
-                st.success(f"✅ Insert transaction prepared with trans_id={next_trans_id} in {duration:.3f}s")
+                st.success(f"✅ Insert transaction prepared with trans_id={next_trans_id} on Node 1 and Node 2 in {duration:.3f}s")
                 st.warning("⏳ Transaction active - Click 'Commit' to finalize insertion or 'Rollback' to cancel")
 
                 # Show preview
@@ -599,7 +616,7 @@ def main():
                         'k_symbol': k_symbol
                     }])
                     st.dataframe(preview_data)
-                    st.caption(f"Insert prepared on Node {target_node} (not yet committed)")
+                    st.caption(f"Insert prepared on Node 1 and Node 2 (not yet committed)")
 
             except Exception as e:
                 # Don't log failed transactions - only log successful commits
@@ -617,8 +634,7 @@ def main():
         st.title("Update Transaction (Write Operation)")
 
         st.markdown("""
-        Modify an existing transaction record. Updates are first applied to Node 1 (central node)
-        and then replicated to the appropriate partition node.
+        Modify an existing transaction record. Updates are applied to the target node.
         """)
 
         st.subheader("Update Transaction")
@@ -707,20 +723,6 @@ def main():
                         cursor.close()
                         conn.close()
                         
-                        # Replicate to partition node
-                        update_query = txn['query']
-                        account_id = txn.get('account_id')
-                        if account_id:
-                            target_node = get_node_for_account(account_id)
-                            
-                            # Simulate replication to partition node
-                            st.info("🔄 Replicating to partition node...")
-                            time.sleep(0.5)  # Simulate replication delay
-                            
-                            # Replicate to partition node (Node 2 or Node 3)
-                            if target_node != 1:
-                                execute_query(update_query, node=target_node, isolation_level=txn['isolation_level'])
-                        
                         # Log the transaction
                         duration = time.time() - txn['start_time']
                         log_transaction(
@@ -739,7 +741,7 @@ def main():
                         del st.session_state.transaction_connections[idx]
                         del st.session_state.transaction_cursors[idx]
                     
-                    st.success(f"✅ {committed_count} update transaction(s) committed and replicated!")
+                    st.success(f"✅ {committed_count} update transaction(s) committed successfully!")
                     st.toast(f"{committed_count} transaction(s) committed successfully")
                 except Exception as e:
                     st.error(f"Commit failed: {str(e)}")
@@ -806,7 +808,6 @@ def main():
                     else:
                         # Get account_id to determine target partition node
                         account_id = int(found_data.iloc[0]['account_id'])
-                        target_node = 1  # Always update on Node 1 (central node)
 
                         # Build UPDATE query
                         update_query = f"""
@@ -817,37 +818,40 @@ def main():
                         WHERE trans_id = {trans_id}
                         """
 
-                        with st.spinner(f"Starting transaction on Node 1..."):
-                            # Create dedicated connection and start transaction
-                            conn = create_dedicated_connection(target_node, isolation_level)
-                            cursor = conn.cursor(dictionary=True)
-                            
-                            # Set isolation level and start transaction
-                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
-                            cursor.execute("START TRANSACTION")
-                            
-                            # Execute update but don't commit yet
-                            cursor.execute(update_query)
-                            
-                            # Append connection and transaction to lists
-                            st.session_state.transaction_connections.append(conn)
-                            st.session_state.transaction_cursors.append(cursor)
-                            st.session_state.active_transactions.append({
-                                'page': 'update',
-                                'node': target_node,
-                                'operation': 'UPDATE',
-                                'trans_id': trans_id,
-                                'account_id': account_id,
-                                'query': update_query,
-                                'isolation_level': isolation_level,
-                                'start_time': start_time
-                            })
+                        with st.spinner(f"Starting transaction on Node 1 and Node 2..."):
+                            # Prepare transactions on both Node 1 and Node 2
+                            nodes_to_write = [1, 2]
+
+                            for node in nodes_to_write:
+                                conn_temp = create_dedicated_connection(node, isolation_level)
+                                cursor_temp = conn_temp.cursor(dictionary=True)
+
+                                # Set isolation level and start transaction
+                                cursor_temp.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                                cursor_temp.execute("START TRANSACTION")
+
+                                # Execute update but don't commit yet
+                                cursor_temp.execute(update_query)
+
+                                # Append connection and transaction to lists
+                                st.session_state.transaction_connections.append(conn_temp)
+                                st.session_state.transaction_cursors.append(cursor_temp)
+                                st.session_state.active_transactions.append({
+                                    'page': 'update',
+                                    'node': node,
+                                    'operation': 'UPDATE',
+                                    'trans_id': trans_id,
+                                    'account_id': account_id,
+                                    'query': update_query,
+                                    'isolation_level': isolation_level,
+                                    'start_time': start_time
+                                })
 
                         duration = time.time() - start_time
 
                         # DON'T log yet - will log when user commits
 
-                        st.success(f"✅ Update transaction prepared in {duration:.3f}s")
+                        st.success(f"✅ Update transaction prepared on Node 1 and Node 2 in {duration:.3f}s")
                         st.warning("⏳ Transaction active - Click 'Commit' to finalize update or 'Rollback' to cancel")
 
                         # Show preview of change
@@ -860,7 +864,7 @@ def main():
                             updated_preview['type'] = new_type
                             updated_preview['operation'] = new_operation
                             st.dataframe(updated_preview)
-                            st.caption(f"Update prepared on Node 1 (not yet committed)")
+                            st.caption(f"Update prepared on Node 1 and Node 2 (not yet committed)")
 
             except Exception as e:
                 # Don't log failed transactions - only log successful commits
@@ -878,8 +882,7 @@ def main():
         st.title("Delete Transaction (Write Operation)")
 
         st.markdown("""
-        Remove a transaction record from the database. Deletions are first applied to Node 1 (central node)
-        and then replicated to the appropriate partition node.
+        Remove a transaction record from the database. Deletions are applied to the target node.
         """)
 
         # Check if we just completed a deletion
@@ -977,20 +980,6 @@ def main():
                         cursor.close()
                         conn.close()
                         
-                        # Replicate to partition node
-                        delete_query = txn['query']
-                        account_id = txn.get('account_id')
-                        if account_id:
-                            target_node = get_node_for_account(account_id)
-                            
-                            # Simulate replication to partition node
-                            st.info("🔄 Replicating deletion to partition node...")
-                            time.sleep(0.5)  # Simulate replication delay
-                            
-                            # Replicate to partition node (Node 2 or Node 3)
-                            if target_node != 1:
-                                execute_query(delete_query, node=target_node, isolation_level=txn['isolation_level'])
-                        
                         # Log the transaction
                         duration = time.time() - txn['start_time']
                         log_transaction(
@@ -1009,7 +998,7 @@ def main():
                         del st.session_state.transaction_connections[idx]
                         del st.session_state.transaction_cursors[idx]
                     
-                    st.success(f"✅ {committed_count} delete transaction(s) committed and replicated!")
+                    st.success(f"✅ {committed_count} delete transaction(s) committed successfully!")
                     st.toast(f"{committed_count} transaction(s) committed successfully")
                 except Exception as e:
                     st.error(f"Commit failed: {str(e)}")
@@ -1080,49 +1069,51 @@ def main():
                     else:
                         # Get account_id to determine target partition node
                         account_id = int(found_data.iloc[0]['account_id'])
-                        target_node = 1  # Always delete from Node 1 (central node)
 
                         # Build DELETE query
                         delete_query = f"DELETE FROM trans WHERE trans_id = {trans_id}"
 
-                        with st.spinner(f"Starting transaction on Node 1..."):
-                            # Create dedicated connection and start transaction
-                            conn = create_dedicated_connection(target_node, isolation_level)
-                            cursor = conn.cursor(dictionary=True)
-                            
-                            # Set isolation level and start transaction
-                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
-                            cursor.execute("START TRANSACTION")
-                            
-                            # Execute delete but don't commit yet
-                            cursor.execute(delete_query)
-                            
-                            # Append connection and transaction to lists
-                            st.session_state.transaction_connections.append(conn)
-                            st.session_state.transaction_cursors.append(cursor)
-                            st.session_state.active_transactions.append({
-                                'page': 'delete',
-                                'node': target_node,
-                                'operation': 'DELETE',
-                                'trans_id': trans_id,
-                                'account_id': account_id,
-                                'query': delete_query,
-                                'isolation_level': isolation_level,
-                                'start_time': start_time
-                            })
+                        with st.spinner(f"Starting transaction on Node 1 and Node 2..."):
+                            # Prepare transactions on both Node 1 and Node 2
+                            nodes_to_write = [1, 2]
+
+                            for node in nodes_to_write:
+                                conn_temp = create_dedicated_connection(node, isolation_level)
+                                cursor_temp = conn_temp.cursor(dictionary=True)
+
+                                # Set isolation level and start transaction
+                                cursor_temp.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                                cursor_temp.execute("START TRANSACTION")
+
+                                # Execute delete but don't commit yet
+                                cursor_temp.execute(delete_query)
+
+                                # Append connection and transaction to lists
+                                st.session_state.transaction_connections.append(conn_temp)
+                                st.session_state.transaction_cursors.append(cursor_temp)
+                                st.session_state.active_transactions.append({
+                                    'page': 'delete',
+                                    'node': node,
+                                    'operation': 'DELETE',
+                                    'trans_id': trans_id,
+                                    'account_id': account_id,
+                                    'query': delete_query,
+                                    'isolation_level': isolation_level,
+                                    'start_time': start_time
+                                })
 
                         duration = time.time() - start_time
 
                         # DON'T log yet - will log when user commits
 
-                        st.success(f"✅ Delete transaction prepared in {duration:.3f}s")
+                        st.success(f"✅ Delete transaction prepared on Node 1 and Node 2 in {duration:.3f}s")
                         st.warning("⏳ Transaction active - Click 'Commit' to finalize deletion or 'Rollback' to cancel")
 
                         # Show confirmation
                         with st.expander("📝 Pending Deletion"):
                             st.write(f"Transaction ID {trans_id} is marked for deletion")
                             st.dataframe(found_data)
-                            st.caption(f"Delete prepared on Node 1 (not yet committed)")
+                            st.caption(f"Delete prepared on Node 1 and Node 2 (not yet committed)")
 
             except Exception as e:
                 # Don't log failed transactions - only log successful commits

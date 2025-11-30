@@ -218,6 +218,7 @@ def get_db_connection(node):
             user=config["user"],
             password=config["password"],
             database=config["database"],
+            autocommit=False,
             connect_timeout=10  # Add timeout to prevent hanging
         )
         return conn
@@ -408,137 +409,6 @@ def execute_query(query, node, isolation_level="READ COMMITTED"):
             cursor.close()
         if conn:
             conn.close()
-
-def execute_multi_statement_query(query, node, ttl=3600):
-    """
-    Execute a multi-statement SQL query and return the final SELECT results from a specific node.
-    Useful for queries that create temporary tables before selecting data.
-    Results are cached to avoid repeated database queries.
-
-    IMPORTANT: This function bypasses Streamlit's connection pooling to maintain
-    a single connection across all statements (required for temporary tables).
-
-    Args:
-        query (str): Multi-statement SQL query (statements separated by semicolons)
-        node (int): Node number (1, 2, or 3) to execute on
-        ttl (int): Time-to-live for cached results in seconds (default: 3600)
-
-    Returns:
-        pandas.DataFrame: Results from the final SELECT statement (from cache or fresh)
-
-    Raises:
-        Exception: If query execution fails
-    """
-    # Validate node number
-    if node not in NODE_CONFIGS:
-        raise ValueError(f"Invalid node number: {node}. Must be 1, 2, or 3.")
-
-    # Generate cache key
-    cache_key = _generate_cache_key(query, node)
-
-    # Check if we have a valid cached result
-    if CACHE_ENABLED and cache_key in _query_cache:
-        cache_entry = _query_cache[cache_key]
-        if _is_cache_valid(cache_entry):
-            # Return cached data (create a copy to prevent modifications)
-            return cache_entry['data'].copy()
-        else:
-            # Remove expired cache entry
-            del _query_cache[cache_key]
-
-    # Cache miss or expired - fetch from database
-    conn = None
-    cursor = None
-    config = get_node_config(node)
-    config_type = "Cloud SQL" if USE_CLOUD_SQL else "Local"
-
-    try:
-        # Establish direct connection (not using st.connection to maintain single session)
-        conn = mysql.connector.connect(
-            host=config["host"],
-            port=config["port"],
-            user=config["user"],
-            password=config["password"],
-            database=config["database"],
-            connect_timeout=30,  # Longer timeout for cloud connections
-            autocommit=True,  # Important for temporary tables
-            allow_local_infile=False,  # Security setting
-            consume_results=True  # Automatically consume unread results
-        )
-
-        cursor = conn.cursor(dictionary=True, buffered=True)
-
-        # Split the query into individual statements
-        statements = [s.strip() for s in query.split(';') if s.strip()]
-
-        if len(statements) == 0:
-            raise Exception("No valid SQL statements found in query")
-
-        # Execute all statements in sequence on the same connection
-        # This ensures temporary tables persist across statements
-        for i, statement in enumerate(statements[:-1]):
-            try:
-                cursor.execute(statement)
-                # Try to consume any results
-                try:
-                    cursor.fetchall()
-                except mysql.connector.errors.InterfaceError:
-                    pass  # No results to fetch (e.g., CREATE, DROP statements)
-            except mysql.connector.Error as stmt_err:
-                raise Exception(f"Failed to execute statement {i+1}/{len(statements)} on Node {node}: {str(stmt_err)}\nStatement: {statement[:200]}")
-
-        # Execute the final SELECT statement and fetch results
-        try:
-            cursor.execute(statements[-1])
-            data = cursor.fetchall()
-            result_df = pd.DataFrame(data)
-        except mysql.connector.Error as stmt_err:
-            raise Exception(f"Failed to execute final SELECT statement on Node {node}: {str(stmt_err)}\nStatement: {statements[-1][:200]}")
-
-        # Store in cache
-        if CACHE_ENABLED:
-            _query_cache[cache_key] = {
-                'timestamp': datetime.now(),
-                'data': result_df.copy(),
-                'query': query[:100],  # Store first 100 chars for debugging
-                'node': node
-            }
-
-        return result_df
-
-    except mysql.connector.Error as db_err:
-        error_code = db_err.errno if hasattr(db_err, 'errno') else 'Unknown'
-        error_msg = (
-            f"Database error in multi-statement query ({config_type}, Node {node})\n"
-            f"Host: {config['host']}:{config['port']}\n"
-            f"Database: {config['database']}\n"
-            f"Error Code: {error_code}\n"
-            f"Error: {str(db_err)}\n\n"
-            f"Query preview: {query[:300]}..."
-        )
-        raise Exception(error_msg)
-
-    except Exception as e:
-        error_msg = (
-            f"Failed to execute multi-statement query on {config_type} (Node {node})\n"
-            f"Host: {config['host']}:{config['port']}\n"
-            f"Error type: {type(e).__name__}\n"
-            f"Error: {str(e)}"
-        )
-        raise Exception(error_msg)
-
-    finally:
-        if cursor:
-            try:
-                cursor.close()
-            except:
-                pass
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
-
 
 def test_connection(node):
     """
@@ -843,6 +713,84 @@ def check_connectivity() -> Dict[int, bool]:
     return status
 
 
+def get_max_trans_id_multi_node() -> Dict[str, Any]:
+    """
+    Query all available nodes for MAX(trans_id) and return the highest value.
+
+    Multi-master replication rules:
+    - If node 1 is down but nodes 2 and 3 are up: continue with queries
+    - If node 1 is up but nodes 2 and 3 are both down: continue with queries
+    - If node 1 and node 2 are down, OR node 1 and node 3 are down: abort (insufficient nodes)
+
+    Returns:
+        dict: {
+            'status': 'success' | 'failed',
+            'max_trans_id': int (highest trans_id found),
+            'available_nodes': list of available node numbers,
+            'node_values': dict mapping node numbers to their max trans_id values,
+            'error': str (only if status is 'failed')
+        }
+    """
+    # Check connectivity to all nodes
+    connectivity = check_connectivity()
+    available_nodes = [node for node, is_up in connectivity.items() if is_up]
+
+    # Apply multi-master rules
+    node1_up = connectivity.get(1, False)
+    node2_up = connectivity.get(2, False)
+    node3_up = connectivity.get(3, False)
+
+    # Check if we should abort based on failure rules
+    if (not node1_up and not node2_up) or (not node1_up and not node3_up):
+        return {
+            'status': 'failed',
+            'max_trans_id': 0,
+            'available_nodes': available_nodes,
+            'node_values': {},
+            'error': 'Insufficient nodes available. Node 1 and at least one other node must be up.'
+        }
+
+    # If no nodes are available at all
+    if not available_nodes:
+        return {
+            'status': 'failed',
+            'max_trans_id': 0,
+            'available_nodes': [],
+            'node_values': {},
+            'error': 'All database nodes are down.'
+        }
+
+    # Query each available node for MAX(trans_id)
+    node_values = {}
+    max_trans_id = 0
+
+    for node in available_nodes:
+        try:
+            conn = get_db_connection(node)
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT COALESCE(MAX(trans_id), 0) as max_id FROM trans")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+
+            if result:
+                node_max_id = int(result['max_id'])
+                node_values[node] = node_max_id
+                max_trans_id = max(max_trans_id, node_max_id)
+        except Exception as e:
+            print(f"Error querying Node {node} for max trans_id: {e}")
+            # Node became unavailable during query, continue with others
+            node_values[node] = None
+
+    return {
+        'status': 'success',
+        'max_trans_id': max_trans_id,
+        'available_nodes': available_nodes,
+        'node_values': node_values,
+        'error': None
+    }
+
+
 def cleanup_locks(current_node_id: str = "app"):
     """
     Cleanup: release all locks held by this manager.
@@ -853,5 +801,3 @@ def cleanup_locks(current_node_id: str = "app"):
     """
     lock_manager = _get_lock_manager(current_node_id)
     lock_manager.release_all_locks()
-
-
