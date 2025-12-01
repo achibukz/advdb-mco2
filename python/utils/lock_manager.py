@@ -55,6 +55,9 @@ class DistributedLockManager:
         ) ENGINE=InnoDB;
         """
         
+        initialized_nodes = []
+        failed_nodes = []
+        
         for node_num, config in self.node_configs.items():
             try:
                 conn = mysql.connector.connect(**config)
@@ -63,8 +66,19 @@ class DistributedLockManager:
                 conn.commit()
                 cursor.close()
                 conn.close()
+                initialized_nodes.append(node_num)
+                print(f"✓ Lock table initialized on Node {node_num}")
             except Exception as e:
-                print(f"Warning: Could not initialize lock table on Node {node_num}: {e}")
+                failed_nodes.append(node_num)
+                print(f"✗ Failed to initialize lock table on Node {node_num}: {e}")
+        
+        if not initialized_nodes:
+            raise Exception("CRITICAL: Failed to initialize lock tables on ANY node. System cannot operate.")
+        
+        if failed_nodes:
+            print(f"WARNING: Lock tables only available on nodes {initialized_nodes}. Nodes {failed_nodes} unavailable.")
+        else:
+            print(f"✓ Lock tables successfully initialized on all nodes: {initialized_nodes}")
     
     def _get_connection(self, node: int) -> mysql.connector.connection.MySQLConnection:
         """
@@ -307,6 +321,9 @@ class DistributedLockManager:
         """
         Acquire locks on the same resource across multiple nodes atomically.
         
+        This implements the GROWING PHASE of 2-Phase Locking (2PL).
+        All locks must be acquired before any operations on the data.
+        
         This is crucial for distributed transactions that need to update the same
         record on multiple nodes simultaneously. If any lock acquisition fails,
         all previously acquired locks are released.
@@ -322,6 +339,8 @@ class DistributedLockManager:
         start_time = time.time()
         acquired_nodes = []
         
+        print(f"[{self.current_node_id}] 📈 2PL GROWING PHASE: Acquiring locks on {resource_id} across nodes {nodes}")
+        
         try:
             for node in nodes:
                 remaining_timeout = timeout - (time.time() - start_time)
@@ -334,13 +353,19 @@ class DistributedLockManager:
                     raise Exception(f"Failed to acquire lock on Node {node}")
                 
                 acquired_nodes.append(node)
+                print(f"[{self.current_node_id}]   ✓ Lock acquired on Node {node}")
             
-            print(f"[{self.current_node_id}] ✓ Acquired multi-node lock on {resource_id} across nodes {nodes}")
+            # Track this resource as locked
+            if resource_id not in self._active_locks:
+                self._active_locks[resource_id] = []
+            self._active_locks[resource_id].extend(acquired_nodes)
+            
+            print(f"[{self.current_node_id}] ✅ 2PL GROWING PHASE COMPLETE: All locks acquired on {resource_id}")
             return True
         
         except Exception as e:
             # Release all acquired locks
-            print(f"[{self.current_node_id}] Multi-node lock failed for {resource_id}: {e}")
+            print(f"[{self.current_node_id}] ❌ 2PL GROWING PHASE FAILED for {resource_id}: {e}")
             for node in acquired_nodes:
                 self.release_lock(resource_id, node)
             return False
@@ -349,6 +374,9 @@ class DistributedLockManager:
         """
         Release locks on a resource across multiple nodes.
         
+        This implements the SHRINKING PHASE of 2-Phase Locking (2PL).
+        Once any lock is released, no new locks can be acquired for this transaction.
+        
         Args:
             resource_id: Unique identifier for the resource
             nodes: List of node numbers where locks should be released
@@ -356,13 +384,23 @@ class DistributedLockManager:
         Returns:
             bool: True if all locks released successfully
         """
+        print(f"[{self.current_node_id}] 📉 2PL SHRINKING PHASE: Releasing locks on {resource_id} across nodes {nodes}")
+        
         success = True
         for node in nodes:
             if not self.release_lock(resource_id, node):
                 success = False
+            else:
+                print(f"[{self.current_node_id}]   ✓ Lock released on Node {node}")
+        
+        # Remove from active locks tracking
+        if resource_id in self._active_locks:
+            del self._active_locks[resource_id]
         
         if success:
-            print(f"[{self.current_node_id}] ✓ Released multi-node lock on {resource_id} across nodes {nodes}")
+            print(f"[{self.current_node_id}] ✅ 2PL SHRINKING PHASE COMPLETE: All locks released on {resource_id}")
+        else:
+            print(f"[{self.current_node_id}] ⚠️ 2PL SHRINKING PHASE: Some locks failed to release on {resource_id}")
         
         return success
     

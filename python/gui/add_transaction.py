@@ -91,6 +91,7 @@ def render(get_node_for_account, log_transaction):
             try:
                 committed_count = 0
                 indices_to_remove = []
+                processed_trans_ids = set()  # Track which trans_ids have been processed
 
                 # Process transactions one by one
                 for txn in add_transactions:
@@ -103,89 +104,118 @@ def render(get_node_for_account, log_transaction):
                     # Get transaction details
                     primary_node = txn['node']
                     account_id = txn['account_id']
+                    trans_id = txn['trans_id']
                     query = txn['query']
                     isolation_level = txn['isolation_level']
                     
-                    try:
-                        # Commit on primary node first
-                        with st.spinner(f"Committing on Node {primary_node}..."):
+                    # Only commit for the first transaction with this trans_id
+                    if trans_id not in processed_trans_ids:
+                        # Get lock state from transaction (already acquired during INSERT button - 2PL growing phase)
+                        lock_acquired = txn.get('lock_acquired', False)
+                        resource_id = txn.get('resource_id', 'insert_trans')
+                        
+                        try:
+                            # Lock already held from INSERT phase - just commit and replicate
+                            # Commit on primary node first
+                            with st.spinner(f"Committing on Node {primary_node}..."):
+                                conn.commit()
+                                cursor.close()
+                                conn.close()
+                            
+                            st.info(f"Transaction committed on Node {primary_node}")
+                            
+                            # Get current node status for replication decisions
+                            current_node_status = st.session_state.node_pinger.get_status()
+                            partition_node_for_account = get_node_for_account(account_id)
+                            
+                            # Determine replication targets based on primary node
+                            replication_results = []
+                            
+                            if primary_node == 1:
+                                # If primary is Node 1, replicate to partition node
+                                target_node = partition_node_for_account
+                                if target_node != 1:
+                                    with st.spinner(f"Replicating to Node {target_node} (partition node)..."):
+                                        result = replicate_transaction(query, primary_node, target_node, isolation_level)
+                                        replication_results.append((target_node, result))
+                                    
+                            else:
+                                # Primary is Node 2/3: replicate to Node 1 (and potentially other nodes)
+                                # Always try to replicate to Node 1 (central)
+                                with st.spinner(f"Replicating to Node 1 (central)..."):
+                                    result = replicate_transaction(query, primary_node, 1, isolation_level)
+                                    replication_results.append((1, result))
+                                
+                                # If primary is not the natural partition node, also replicate to partition node
+                                if primary_node != partition_node_for_account and partition_node_for_account != 1:
+                                    with st.spinner(f"Replicating to Node {partition_node_for_account} (partition node)..."):
+                                        result = replicate_transaction(query, primary_node, partition_node_for_account, isolation_level)
+                                        replication_results.append((partition_node_for_account, result))
+                            
+                            # Display replication results
+                            successful_replications = 0
+                            failed_replications = 0
+                            
+                            for target_node, result in replication_results:
+                                if result['status'] == 'error':
+                                    st.error(f"Replication to Node {target_node} failed: {result['message']}")
+                                    if result['logged']:
+                                        st.warning(f"Recovery logged: {result['recovery_action']}")
+                                    else:
+                                        st.error(f"Recovery logging failed: {result['recovery_action']}")
+                                    failed_replications += 1
+                                else:
+                                    st.success(f"Successfully replicated to Node {target_node}")
+                                    successful_replications += 1
+                            
+                            # Show replication summary
+                            if replication_results:
+                                if failed_replications > 0:
+                                    st.info(f"Replication Summary: {successful_replications} successful, {failed_replications} failed (logged for recovery)")
+                                else:
+                                    st.success(f"All replications successful ({successful_replications}/{len(replication_results)})")
+                            
+                            # Log successful transaction
+                            duration = time.time() - txn['start_time']
+                            log_transaction(
+                                operation=txn['operation'],
+                                query=txn['query'],
+                                node=txn['node'],
+                                isolation_level=txn['isolation_level'],
+                                status='SUCCESS',
+                                duration=duration
+                            )
+                            committed_count += 1
+                            processed_trans_ids.add(trans_id)
+                            
+                        except Exception as commit_error:
+                            st.error(f"Commit failed on Node {primary_node}: {str(commit_error)}")
+                            try:
+                                conn.rollback()
+                                cursor.close()
+                                conn.close()
+                            except:
+                                pass
+                        finally:
+                            # 2PL SHRINKING PHASE: Release lock after commit and replication complete
+                            if lock_acquired:
+                                st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
+                                st.info("🔓 Lock released (2PL shrinking phase)")
+                    else:
+                        # This is a replica transaction (same trans_id already processed)
+                        # Just commit without acquiring lock (lock already held by primary)
+                        try:
                             conn.commit()
                             cursor.close()
                             conn.close()
-                        
-                        st.info(f"Transaction committed on Node {primary_node}")
-                        
-                        # Get current node status for replication decisions
-                        current_node_status = st.session_state.node_pinger.get_status()
-                        partition_node_for_account = get_node_for_account(account_id)
-                        
-                        # Determine replication targets based on primary node
-                        replication_results = []
-                        
-                        if primary_node == 1:
-                            # If primary is Node 1, replicate to partition node
-                            target_node = partition_node_for_account
-                            if target_node != 1:
-                                with st.spinner(f"Replicating to Node {target_node} (partition node)..."):
-                                    result = replicate_transaction(query, primary_node, target_node, isolation_level)
-                                    replication_results.append((target_node, result))
-                                
-                        else:
-                            # Primary is Node 2/3: replicate to Node 1 (and potentially other nodes)
-                            # Always try to replicate to Node 1 (central)
-                            with st.spinner(f"Replicating to Node 1 (central)..."):
-                                result = replicate_transaction(query, primary_node, 1, isolation_level)
-                                replication_results.append((1, result))
-                            
-                            # If primary is not the natural partition node, also replicate to partition node
-                            if primary_node != partition_node_for_account and partition_node_for_account != 1:
-                                with st.spinner(f"Replicating to Node {partition_node_for_account} (partition node)..."):
-                                    result = replicate_transaction(query, primary_node, partition_node_for_account, isolation_level)
-                                    replication_results.append((partition_node_for_account, result))
-                        
-                        # Display replication results
-                        successful_replications = 0
-                        failed_replications = 0
-                        
-                        for target_node, result in replication_results:
-                            if result['status'] == 'error':
-                                st.error(f"Replication to Node {target_node} failed: {result['message']}")
-                                if result['logged']:
-                                    st.warning(f"Recovery logged: {result['recovery_action']}")
-                                else:
-                                    st.error(f"Recovery logging failed: {result['recovery_action']}")
-                                failed_replications += 1
-                            else:
-                                st.success(f"Successfully replicated to Node {target_node}")
-                                successful_replications += 1
-                        
-                        # Show replication summary
-                        if replication_results:
-                            if failed_replications > 0:
-                                st.info(f"Replication Summary: {successful_replications} successful, {failed_replications} failed (logged for recovery)")
-                            else:
-                                st.success(f"All replications successful ({successful_replications}/{len(replication_results)})")
-                        
-                        # Log successful transaction
-                        duration = time.time() - txn['start_time']
-                        log_transaction(
-                            operation=txn['operation'],
-                            query=txn['query'],
-                            node=txn['node'],
-                            isolation_level=txn['isolation_level'],
-                            status='SUCCESS',
-                            duration=duration
-                        )
-                        committed_count += 1
-                        
-                    except Exception as commit_error:
-                        st.error(f"Commit failed on Node {primary_node}: {str(commit_error)}")
-                        try:
-                            conn.rollback()
-                            cursor.close()
-                            conn.close()
-                        except:
-                            pass
+                        except Exception as e:
+                            st.error(f"Replica commit failed: {str(e)}")
+                            try:
+                                conn.rollback()
+                                cursor.close()
+                                conn.close()
+                            except:
+                                pass
 
                 # Remove processed transactions
                 for idx in sorted(indices_to_remove, reverse=True):
@@ -219,6 +249,12 @@ def render(get_node_for_account, log_transaction):
                     conn.rollback()
                     cursor.close()
                     conn.close()
+                    
+                    # Release lock on rollback (2PL abort - release all locks)
+                    if txn.get('lock_acquired', False):
+                        resource_id = txn.get('resource_id', 'insert_trans')
+                        st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
+                    
                     rolled_back_count += 1
 
                 # Remove in reverse order to maintain correct indices
@@ -291,23 +327,10 @@ def render(get_node_for_account, log_transaction):
                     })
                 st.dataframe(pd.DataFrame(status_data))
 
-            # Acquire distributed lock before inserting
-            with st.spinner(f"Acquiring distributed lock..."):
-                # Try to acquire lock on available nodes
-                lock_node = primary_node if node_status.get(primary_node, False) else None
-                if not lock_node:
-                    # Find any available node for locking
-                    for node in [1, 2, 3]:
-                        if node_status.get(node, False):
-                            lock_node = node
-                            break
-                
-                if not lock_node:
-                    st.error("No nodes available for locking. Please check node connectivity.")
-                    st.stop()
-                
-                lock_acquired = st.session_state.lock_manager.acquire_lock(
-                    resource_id, node=lock_node, timeout=30
+            # Acquire distributed lock across all available nodes before inserting
+            with st.spinner(f"Acquiring distributed lock across all nodes..."):
+                lock_acquired = st.session_state.lock_manager.acquire_multi_node_lock(
+                    resource_id, nodes=[1, 2, 3], timeout=30
                 )
 
                 if not lock_acquired:
@@ -367,7 +390,9 @@ def render(get_node_for_account, log_transaction):
                     'isolation_level': isolation_level,
                     'start_time': start_time,
                     'trans_id': next_trans_id,
-                    'account_id': account_id
+                    'account_id': account_id,
+                    'lock_acquired': lock_acquired,  # Track lock state for 2PL
+                    'resource_id': resource_id  # Store resource_id for lock release
                 })
 
             duration = time.time() - start_time
@@ -399,8 +424,6 @@ def render(get_node_for_account, log_transaction):
         except Exception as e:
             # Don't log failed transactions - only log successful commits
             st.error(f"❌ Error: {str(e)}")
-
-        finally:
-            # Always release the lock
+            # On error, release lock immediately since transaction won't proceed
             if lock_acquired:
-                st.session_state.lock_manager.release_lock(resource_id, node=lock_node)
+                st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])

@@ -218,14 +218,17 @@ def render(get_node_for_account, log_transaction):
                     conn = st.session_state.transaction_connections[idx]
                     cursor = st.session_state.transaction_cursors[idx]
                     
-                    # Get transaction details
+                    # Get transaction details and lock state
                     primary_node = txn['node']
                     account_id = txn['account_id']
                     query = txn['query']
                     isolation_level = txn['isolation_level']
                     trans_id = txn['trans_id']
+                    lock_acquired = txn.get('lock_acquired', False)
+                    resource_id = txn.get('resource_id', f"trans_{trans_id}")
                     
                     try:
+                        # Lock already held from DELETE phase - just commit and replicate (2PL growing phase)
                         # Commit on primary node first
                         with st.spinner(f"Deleting transaction on Node {primary_node}..."):
                             conn.commit()
@@ -313,6 +316,11 @@ def render(get_node_for_account, log_transaction):
                             conn.close()
                         except:
                             pass
+                    finally:
+                        # 2PL SHRINKING PHASE: Release lock after commit and replication complete
+                        if lock_acquired:
+                            st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
+                            st.info("🔓 Lock released (2PL shrinking phase)")
 
                 # Remove processed transactions
                 for idx in sorted(indices_to_remove, reverse=True):
@@ -346,6 +354,12 @@ def render(get_node_for_account, log_transaction):
                     conn.rollback()
                     cursor.close()
                     conn.close()
+                    
+                    # Release lock on rollback (2PL abort - release all locks)
+                    if txn.get('lock_acquired', False):
+                        resource_id = txn.get('resource_id', f"trans_{txn.get('trans_id')}")
+                        st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
+                    
                     rolled_back_count += 1
 
                 # Remove in reverse order to maintain correct indices
@@ -378,23 +392,10 @@ def render(get_node_for_account, log_transaction):
             # Check node status using server pinger
             node_status = st.session_state.node_pinger.get_status()
             
-            # Acquire distributed lock before deleting
+            # Acquire distributed lock across all available nodes before deleting
             with st.spinner(f"Acquiring distributed lock on transaction {trans_id}..."):
-                # Try to acquire lock on available nodes
-                lock_node = 1 if node_status.get(1, False) else None
-                if not lock_node:
-                    # Find any available node for locking
-                    for node in [1, 2, 3]:
-                        if node_status.get(node, False):
-                            lock_node = node
-                            break
-                
-                if not lock_node:
-                    st.error("No nodes available for locking. Please check node connectivity.")
-                    st.stop()
-                
-                lock_acquired = st.session_state.lock_manager.acquire_lock(
-                    resource_id, node=lock_node, timeout=30
+                lock_acquired = st.session_state.lock_manager.acquire_multi_node_lock(
+                    resource_id, nodes=[1, 2, 3], timeout=30
                 )
 
                 if not lock_acquired:
@@ -517,7 +518,9 @@ def render(get_node_for_account, log_transaction):
                     'account_id': account_id,
                     'query': delete_query,
                     'isolation_level': isolation_level,
-                    'start_time': start_time
+                    'start_time': start_time,
+                    'lock_acquired': lock_acquired,  # Track lock state for 2PL
+                    'resource_id': resource_id  # Store resource_id for lock release
                 })
 
             duration = time.time() - start_time
@@ -540,8 +543,6 @@ def render(get_node_for_account, log_transaction):
         except Exception as e:
             # Don't log failed transactions - only log successful commits
             st.error(f"Error: {str(e)}")
-
-        finally:
-            # Always release the lock
+            # On error, release lock immediately since transaction won't proceed
             if lock_acquired:
-                st.session_state.lock_manager.release_lock(resource_id, node=lock_node)
+                st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
