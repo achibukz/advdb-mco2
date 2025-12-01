@@ -66,6 +66,30 @@ CACHE_ENABLED = str(_get_config_value('CACHE_ENABLED', 'True')).lower() == 'true
 CACHE_TTL_SECONDS = int(_get_config_value('CACHE_TTL_SECONDS', '3600'))
 _query_cache = {}  # In-memory cache storage per node
 
+# Node Selection Configuration
+# For Streamlit deployment: Use NODE_USE from secrets.toml (must be set manually: 1, 2, or 3)
+# For local use: Use NODE_USE from environment variable (set by run.py <node_number>)
+def get_active_node():
+    """
+    Get the active node number for this instance.
+
+    Returns:
+        int: Node number (1, 2, or 3). Defaults to 1 if not specified.
+    """
+    node_use = _get_config_value('NODE_USE', '1')
+    try:
+        node = int(node_use)
+        if node not in [1, 2, 3]:
+            print(f"Warning: Invalid NODE_USE value '{node}'. Defaulting to node 1.")
+            return 1
+        return node
+    except ValueError:
+        print(f"Warning: Invalid NODE_USE value '{node_use}'. Defaulting to node 1.")
+        return 1
+
+# Active node - this determines which database node this instance connects to
+NODE_USE = get_active_node()
+
 # Database Configuration
 # Choose connection method by setting USE_CLOUD_SQL environment variable
 USE_CLOUD_SQL = str(_get_config_value('USE_CLOUD_SQL', 'False')).lower() == 'true'

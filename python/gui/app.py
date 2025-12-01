@@ -12,7 +12,7 @@ import os
 # Add parent directory to path for imports (fixes Streamlit Cloud deployment)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from python.db.db_config import fetch_data, execute_query, get_node_config
+from python.db.db_config import fetch_data, execute_query, get_node_config, NODE_USE
 from python.utils.lock_manager import DistributedLockManager
 from python.utils.server_ping import NodePinger
 
@@ -124,10 +124,10 @@ def main():
     if page == "Home":
         st.title("Distributed Database Transaction Manager")
 
-        st.markdown("""
+        st.markdown(f"""
         ## Welcome to the Transaction Manager
         
-        INSERT INTRO HERE
+        Connected to Node {NODE_USE}
                     
         """)
 

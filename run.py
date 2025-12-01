@@ -249,9 +249,16 @@ def check_and_start_containers():
         print()
 
 
-def run_streamlit():
-    """Run the Streamlit application"""
+def run_streamlit(node=None):
+    """Run the Streamlit application
+
+    Args:
+        node (int, optional): Node number (1, 2, or 3) to connect to.
+                             Only used for local development.
+    """
     print("Starting Streamlit application...")
+    if node:
+        print(f"Connecting to Node {node}...")
     print()
     print("=" * 48)
     print("Dashboard will open in your browser")
@@ -261,14 +268,60 @@ def run_streamlit():
     
     python_executable = str(get_python_executable())
     
+    # Set NODE_USE environment variable for local use only
+    env = os.environ.copy()
+    if node:
+        env['NODE_USE'] = str(node)
+
     try:
-        subprocess.run([python_executable, "-m", "streamlit", "run", "python/gui/app.py"])
+        subprocess.run(
+            [python_executable, "-m", "streamlit", "run", "python/gui/app.py"],
+            env=env
+        )
     except KeyboardInterrupt:
         print("\nApplication stopped by user.")
 
 
 def main():
     print_header()
+
+    # Parse command-line arguments for node selection (LOCAL USE ONLY)
+    node = None
+    if len(sys.argv) > 1:
+        try:
+            node = int(sys.argv[1])
+            if node not in [1, 2, 3]:
+                print()
+                print("[ERROR] Invalid node number!")
+                print()
+                print("Usage: python run.py [node_number]")
+                print("  node_number: 1, 2, or 3 (which database node to connect to)")
+                print()
+                print("Example: python run.py 1")
+                print()
+                print("Note: This argument is for LOCAL USE ONLY.")
+                print("      For Streamlit Cloud deployment, set NODE_USE in secrets.toml")
+                print()
+                input("Press Enter to exit...")
+                sys.exit(1)
+            print(f"Node {node} selected via command-line argument (local use)")
+            print()
+        except ValueError:
+            print()
+            print("[ERROR] Invalid node number format!")
+            print()
+            print("Usage: python run.py [node_number]")
+            print("  node_number: 1, 2, or 3 (which database node to connect to)")
+            print()
+            print("Example: python run.py 1")
+            print()
+            input("Press Enter to exit...")
+            sys.exit(1)
+    else:
+        print("No node specified - will use default (Node 1) or NODE_USE from .env")
+        print("Tip: Use 'python run.py [1|2|3]' to specify a node")
+        print()
+
     check_env_file()
     create_venv()
     
@@ -276,8 +329,8 @@ def main():
     install_dependencies()
     check_docker()
     check_and_start_containers()
-    run_streamlit()
-    
+    run_streamlit(node)
+
     input("\nPress Enter to exit...")
 
 
