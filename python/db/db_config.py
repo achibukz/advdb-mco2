@@ -539,7 +539,7 @@ def get_max_trans_id_multi_node() -> Dict[str, Any]:
         try:
             conn = get_db_connection(node)
             cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT COALESCE(MAX(trans_id), 0) as max_id FROM trans")
+            cursor.execute("SELECT COALESCE(MAX(trans_id), 0) as max_id FROM trans FOR UPDATE")
             result = cursor.fetchone()
             cursor.close()
             conn.close()

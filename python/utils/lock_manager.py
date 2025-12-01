@@ -124,6 +124,7 @@ class DistributedLockManager:
         SELECT locked_by, lock_time 
         FROM distributed_lock 
         WHERE lock_name = %s
+        FOR UPDATE  -- Row-level lock to prevent race conditions
         """
         
         insert_lock_sql = """
@@ -158,12 +159,15 @@ class DistributedLockManager:
                     return False
                 
                 try:
-                    # Check if lock exists
+                    # Start transaction for atomic lock check-and-acquire
+                    cursor.execute("START TRANSACTION")
+                    
+                    # Check if lock exists with row-level lock (FOR UPDATE prevents race conditions)
                     cursor.execute(select_lock_sql, (lock_name,))
                     result = cursor.fetchone()
                     
                     if result is None:
-                        # Lock doesn't exist - try to create it
+                        # Lock doesn't exist - create it atomically
                         try:
                             cursor.execute(insert_lock_sql, (lock_name, self.current_node_id))
                             conn.commit()
@@ -177,14 +181,15 @@ class DistributedLockManager:
                             return True
                             
                         except mysql.connector.IntegrityError:
-                            # Another transaction inserted the lock between our SELECT and INSERT
-                            # Loop and try again
+                            # Should not happen with FOR UPDATE, but handle gracefully
+                            conn.rollback()
                             time.sleep(0.1)
                             continue
                     
                     else:
                         # Lock exists - check if it's ours
                         if result['locked_by'] == self.current_node_id:
+                            conn.commit()  # Release the row lock
                             print(f"[{self.current_node_id}] ✓ Already hold lock on {resource_id} at Node {node}")
                             
                             # Track this lock if not already tracked
@@ -206,7 +211,8 @@ class DistributedLockManager:
                             # Loop and try to acquire again
                             continue
                         
-                        # Wait and retry
+                        # Lock is held by another active session - rollback and wait
+                        conn.rollback()
                         print(f"[{self.current_node_id}] Waiting for lock on {resource_id} at Node {node} (held by {result['locked_by']})")
                         time.sleep(0.5)
                         continue

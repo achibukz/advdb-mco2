@@ -120,16 +120,81 @@ def render(get_node_for_account, log_transaction):
                         lock_acquired = txn.get('lock_acquired', False)
                         resource_id = txn.get('resource_id', 'insert_trans')
                         
+                        retry_count = 0
+                        max_retries = 3
+                        commit_successful = False
+                        
+                        while retry_count < max_retries and not commit_successful:
+                            try:
+                                # Lock already held from INSERT phase - just commit and replicate
+                                # Commit on primary node first
+                                with st.spinner(f"Committing on Node {primary_node}..."):
+                                    conn.commit()
+                                    commit_successful = True
+                                
+                                st.info(f"Transaction committed on Node {primary_node}")
+                                
+                            except Exception as commit_error:
+                                error_str = str(commit_error)
+                                
+                                # Check if it's a duplicate key error (1062)
+                                if "1062" in error_str and "Duplicate entry" in error_str:
+                                    retry_count += 1
+                                    
+                                    if retry_count < max_retries:
+                                        st.warning(f"⚠️ Duplicate trans_id detected. Retrying with new ID... (Attempt {retry_count}/{max_retries})")
+                                        
+                                        try:
+                                            # Rollback current transaction
+                                            conn.rollback()
+                                            
+                                            # Re-read max_trans_id from all nodes
+                                            max_result = get_max_trans_id_multi_node()
+                                            
+                                            if max_result['status'] == 'failed':
+                                                st.error(f"Cannot retry: {max_result['error']}")
+                                                raise commit_error
+                                            
+                                            # Get new trans_id
+                                            new_trans_id = max_result['max_trans_id'] + 1
+                                            st.info(f"🔄 Retrying with new trans_id: {new_trans_id} (was {trans_id})")
+                                            
+                                            # Rebuild INSERT query with new trans_id
+                                            new_query = query.replace(f"VALUES ({trans_id},", f"VALUES ({new_trans_id},")
+                                            
+                                            # Re-execute INSERT with new ID
+                                            cursor = conn.cursor(dictionary=True)
+                                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}")
+                                            cursor.execute("START TRANSACTION")
+                                            cursor.execute(new_query)
+                                            
+                                            # Update transaction metadata
+                                            txn['trans_id'] = new_trans_id
+                                            txn['query'] = new_query
+                                            trans_id = new_trans_id
+                                            query = new_query
+                                            
+                                            # Update cursor reference
+                                            st.session_state.transaction_cursors[idx] = cursor
+                                            
+                                        except Exception as retry_error:
+                                            st.error(f"Retry failed: {str(retry_error)}")
+                                            raise commit_error
+                                    else:
+                                        st.error(f"❌ Max retries ({max_retries}) reached. Transaction failed.")
+                                        raise commit_error
+                                else:
+                                    # Not a duplicate key error - raise immediately
+                                    raise commit_error
+                        
+                        if not commit_successful:
+                            st.error(f"❌ Transaction could not be committed after {max_retries} attempts")
+                            # Release lock and skip to next transaction
+                            if lock_acquired:
+                                st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
+                            continue
+                        
                         try:
-                            # Lock already held from INSERT phase - just commit and replicate
-                            # Commit on primary node first
-                            with st.spinner(f"Committing on Node {primary_node}..."):
-                                conn.commit()
-                                cursor.close()
-                                conn.close()
-                            
-                            st.info(f"Transaction committed on Node {primary_node}")
-                            
                             # Get current node status for replication decisions
                             current_node_status = st.session_state.node_pinger.get_status()
                             partition_node_for_account = get_node_for_account(account_id)
@@ -194,8 +259,8 @@ def render(get_node_for_account, log_transaction):
                             committed_count += 1
                             processed_trans_ids.add(trans_id)
                             
-                        except Exception as commit_error:
-                            st.error(f"Commit failed on Node {primary_node}: {str(commit_error)}")
+                        except Exception as replication_error:
+                            st.error(f"❌ Replication failed: {str(replication_error)}")
                             try:
                                 conn.rollback()
                                 cursor.close()
@@ -203,6 +268,13 @@ def render(get_node_for_account, log_transaction):
                             except:
                                 pass
                         finally:
+                            # Close cursor and connection
+                            try:
+                                cursor.close()
+                                conn.close()
+                            except:
+                                pass
+                            
                             # 2PL SHRINKING PHASE: Release lock after commit and replication complete
                             if lock_acquired:
                                 st.session_state.lock_manager.release_multi_node_lock(resource_id, nodes=[1, 2, 3])
@@ -300,7 +372,19 @@ def render(get_node_for_account, log_transaction):
                 else:
                     st.info("Recovery already running by another process")
             
-            # Step 2: Check node status using server pinger
+            # Step 2: Acquire distributed lock BEFORE querying max_trans_id (prevents race condition)
+            with st.spinner(f"Acquiring distributed lock across all nodes..."):
+                lock_acquired = st.session_state.lock_manager.acquire_multi_node_lock(
+                    resource_id, nodes=[1, 2, 3], timeout=30
+                )
+
+                if not lock_acquired:
+                    st.error("Failed to acquire lock. Another user may be inserting. Please try again.")
+                    st.stop()
+                
+                st.info(f"✅ Lock acquired successfully by session {st.session_state.lock_manager.current_node_id}")
+            
+            # Step 3: Check node status using server pinger
             node_status = st.session_state.node_pinger.get_status()
             
             # Determine primary node with robust fallback logic
@@ -351,16 +435,7 @@ def render(get_node_for_account, log_transaction):
                     })
                 st.dataframe(pd.DataFrame(status_data))
 
-            # Acquire distributed lock across all available nodes before inserting
-            with st.spinner(f"Acquiring distributed lock across all nodes..."):
-                lock_acquired = st.session_state.lock_manager.acquire_multi_node_lock(
-                    resource_id, nodes=[1, 2, 3], timeout=30
-                )
-
-                if not lock_acquired:
-                    st.error("Failed to acquire lock. Another user may be inserting. Please try again.")
-                    st.stop()
-
+            # Step 4: Query max_trans_id AFTER acquiring lock (prevents concurrent ID collision)
             with st.spinner(f"Checking available nodes for highest trans_id..."):
                 # Query all available nodes for MAX(trans_id) and get the highest value
                 max_result = get_max_trans_id_multi_node()
