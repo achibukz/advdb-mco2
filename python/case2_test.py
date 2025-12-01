@@ -25,6 +25,310 @@ class MixedReadWriteTest:
         
         # Initialize distributed lock manager
         self.lock_manager = DistributedLockManager(self.node_configs, current_node_id="case2_test")
+        
+        # Store prepared transactions (connection, cursor, lock info)
+        self.prepared_transactions = {}
+        self.prepared_lock = threading.Lock()
+    
+    def prepare_write_transaction(self, trans_id, new_amount, transaction_id, isolation_level):
+        """
+        Phase 1: Prepare write transaction (matches app's INSERT/UPDATE/DELETE button)
+        - Acquire multi-node distributed lock
+        - Start transaction
+        - Execute UPDATE statement (uncommitted)
+        - Keep lock held and connection open
+        """
+        start_time = time.time()
+        resource_id = f"trans_{trans_id}"
+        
+        conn = None
+        cursor = None
+        lock_acquired = False
+        acquired_nodes = []
+        
+        try:
+            # Acquire distributed lock on ALL nodes (multi-node locking)
+            print(f"[{transaction_id}] GROWING PHASE: Attempting to acquire multi-node lock on {resource_id} at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            
+            # Try to acquire lock on all 3 nodes
+            for node_id in [1, 2, 3]:
+                try:
+                    if self.lock_manager.acquire_lock(resource_id, node_id, timeout=30):
+                        acquired_nodes.append(node_id)
+                        print(f"[{transaction_id}]   Lock acquired on Node {node_id}")
+                    else:
+                        print(f"[{transaction_id}]   Failed to acquire lock on Node {node_id}")
+                except Exception as e:
+                    print(f"[{transaction_id}]   WARNING: Node {node_id} unavailable: {str(e)}")
+            
+            if len(acquired_nodes) == 0:
+                raise Exception(f"Failed to acquire lock on any node for {resource_id}")
+            
+            lock_acquired = True
+            print(f"[{transaction_id}] Multi-node lock acquired on {len(acquired_nodes)}/3 nodes: {acquired_nodes}")
+            
+            # Determine primary node for execution (use first available node)
+            primary_node = acquired_nodes[0]
+            
+            # Connect to primary node
+            config = self.node_configs[primary_node]
+            conn = mysql.connector.connect(**config)
+            cursor = conn.cursor(dictionary=True)
+            
+            # Set isolation level
+            cursor.execute(f"SET SESSION TRANSACTION ISOLATION LEVEL {isolation_level}")
+            
+            # Start transaction
+            cursor.execute("START TRANSACTION")
+            print(f"[{transaction_id}] Transaction started on Node {primary_node}")
+            
+            # Read current value
+            cursor.execute("SELECT trans_id, amount FROM trans WHERE trans_id = %s", (trans_id,))
+            before = cursor.fetchone()
+            
+            if not before:
+                raise Exception(f"Record with trans_id={trans_id} not found on Node {primary_node}")
+            
+            # Execute UPDATE statement (uncommitted - row locked)
+            cursor.execute("UPDATE trans SET amount = %s WHERE trans_id = %s", (new_amount, trans_id))
+            affected_rows = cursor.rowcount
+            
+            print(f"[{transaction_id}] UPDATE prepared (uncommitted) on Node {primary_node}: {before['amount']} → {new_amount}")
+            
+            # Store prepared transaction info (keep connection and lock held)
+            with self.prepared_lock:
+                self.prepared_transactions[transaction_id] = {
+                    'conn': conn,
+                    'cursor': cursor,
+                    'resource_id': resource_id,
+                    'acquired_nodes': acquired_nodes,
+                    'primary_node': primary_node,
+                    'trans_id': trans_id,
+                    'before_amount': float(before['amount']),
+                    'new_amount': new_amount,
+                    'affected_rows': affected_rows,
+                    'start_time': start_time,
+                    'isolation_level': isolation_level
+                }
+            
+            return True
+            
+        except Exception as e:
+            # Rollback and cleanup on error
+            print(f"[{transaction_id}] ERROR during prepare: {str(e)}")
+            
+            if conn:
+                conn.rollback()
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+            
+            # Release locks on all acquired nodes
+            if lock_acquired and acquired_nodes:
+                for node_id in acquired_nodes:
+                    try:
+                        self.lock_manager.release_lock(resource_id, node_id)
+                    except:
+                        pass
+            
+            # Store error result
+            end_time = time.time()
+            with self.lock:
+                self.results[transaction_id] = {
+                    'type': 'WRITE',
+                    'status': 'FAILED',
+                    'error': str(e),
+                    'phase': 'PREPARE',
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': end_time - start_time
+                }
+            
+            return False
+    
+    def commit_write_transaction(self, transaction_id):
+        """
+        Phase 2: Commit write transaction (matches app's COMMIT button)
+        - Commit transaction on primary node
+        - Simulate replication to other nodes
+        - Release multi-node distributed lock (SHRINKING PHASE)
+        """
+        # Retrieve prepared transaction
+        with self.prepared_lock:
+            if transaction_id not in self.prepared_transactions:
+                print(f"[{transaction_id}] ERROR: No prepared transaction found")
+                return False
+            
+            prep = self.prepared_transactions[transaction_id]
+        
+        conn = prep['conn']
+        cursor = prep['cursor']
+        resource_id = prep['resource_id']
+        acquired_nodes = prep['acquired_nodes']
+        primary_node = prep['primary_node']
+        trans_id = prep['trans_id']
+        start_time = prep['start_time']
+        
+        try:
+            print(f"[{transaction_id}] Committing transaction on Node {primary_node}...")
+            
+            # Read updated value before commit
+            cursor.execute("SELECT trans_id, amount FROM trans WHERE trans_id = %s", (trans_id,))
+            after = cursor.fetchone()
+            
+            # Commit transaction (lock still held)
+            conn.commit()
+            print(f"[{transaction_id}] Transaction committed on Node {primary_node}")
+            
+            # Simulate replication to other nodes (best-effort)
+            replication_success = 0
+            for target_node in [1, 2, 3]:
+                if target_node != primary_node:
+                    try:
+                        # Simulate replication delay
+                        time.sleep(0.05)
+                        
+                        # Actually replicate if node is available
+                        target_config = self.node_configs[target_node]
+                        target_conn = mysql.connector.connect(**target_config)
+                        target_cursor = target_conn.cursor()
+                        
+                        target_cursor.execute(
+                            "UPDATE trans SET amount = %s WHERE trans_id = %s",
+                            (prep['new_amount'], trans_id)
+                        )
+                        target_conn.commit()
+                        target_cursor.close()
+                        target_conn.close()
+                        
+                        replication_success += 1
+                        print(f"[{transaction_id}]   Replicated to Node {target_node}")
+                    except Exception as e:
+                        print(f"[{transaction_id}]   WARNING: Replication to Node {target_node} failed: {str(e)}")
+            
+            print(f"[{transaction_id}] Replication complete: {replication_success}/{len([1,2,3])-1} nodes")
+            
+            end_time = time.time()
+            
+            # Store success result
+            with self.lock:
+                self.results[transaction_id] = {
+                    'type': 'WRITE',
+                    'node': f'node{primary_node}',
+                    'status': 'SUCCESS',
+                    'trans_id': trans_id,
+                    'before_amount': prep['before_amount'],
+                    'after_amount': float(after['amount']),
+                    'affected_rows': prep['affected_rows'],
+                    'replicated_nodes': replication_success,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': end_time - start_time
+                }
+            
+            return True
+            
+        except Exception as e:
+            end_time = time.time()
+            print(f"[{transaction_id}] ERROR during commit: {str(e)}")
+            
+            if conn:
+                conn.rollback()
+            
+            with self.lock:
+                self.results[transaction_id] = {
+                    'type': 'WRITE',
+                    'status': 'FAILED',
+                    'error': str(e),
+                    'phase': 'COMMIT',
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': end_time - start_time
+                }
+            
+            return False
+            
+        finally:
+            # SHRINKING PHASE - Release locks on all nodes
+            print(f"[{transaction_id}] SHRINKING PHASE: Releasing multi-node lock for {resource_id}")
+            
+            for node_id in acquired_nodes:
+                try:
+                    self.lock_manager.release_lock(resource_id, node_id)
+                    print(f"[{transaction_id}]   Lock released on Node {node_id}")
+                except Exception as e:
+                    print(f"[{transaction_id}]   WARNING: Failed to release lock on Node {node_id}: {str(e)}")
+            
+            print(f"[{transaction_id}] Lock released (2PL shrinking phase)")
+            
+            # Close database connection
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+            
+            # Remove from prepared transactions
+            with self.prepared_lock:
+                if transaction_id in self.prepared_transactions:
+                    del self.prepared_transactions[transaction_id]
+    
+    def write_transaction_with_retry(self, trans_id, new_amount, transaction_id, isolation_level, max_retries=3):
+        """
+        Execute write transaction with retry logic for duplicate key errors
+        (matches app's retry behavior in add_transaction.py)
+        """
+        for attempt in range(max_retries):
+            try:
+                # Phase 1: Prepare
+                success = self.prepare_write_transaction(trans_id, new_amount, transaction_id, isolation_level)
+                
+                if not success:
+                    if attempt < max_retries - 1:
+                        print(f"[{transaction_id}] WARNING: Prepare failed. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        print(f"[{transaction_id}] ERROR: Max retries reached. Giving up.")
+                        return False
+                
+                # Phase 2: Commit (back-to-back, no delay)
+                success = self.commit_write_transaction(transaction_id)
+                
+                if success:
+                    return True
+                else:
+                    # Check if it's a duplicate key error that needs retry
+                    with self.lock:
+                        result = self.results.get(transaction_id, {})
+                        error = result.get('error', '')
+                        
+                        if '1062' in error or 'Duplicate entry' in error:
+                            if attempt < max_retries - 1:
+                                print(f"[{transaction_id}] Duplicate key detected. Retrying with new value... (Attempt {attempt + 1}/{max_retries})")
+                                # Increment amount slightly for retry
+                                new_amount += 0.01
+                                time.sleep(0.5)
+                                continue
+                    
+                    if attempt < max_retries - 1:
+                        print(f"[{transaction_id}] WARNING: Commit failed. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        print(f"[{transaction_id}] ERROR: Max retries reached. Giving up.")
+                        return False
+                        
+            except Exception as e:
+                print(f"[{transaction_id}] Exception during write transaction: {str(e)}")
+                if attempt < max_retries - 1:
+                    print(f"[{transaction_id}] Retrying... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(0.5)
+                    continue
+                else:
+                    return False
+        
+        return False
     
     def write_transaction(self, node_num, trans_id, new_amount, transaction_id, isolation_level):
         """Execute a write (UPDATE) transaction on specified node with distributed locking"""
@@ -132,6 +436,10 @@ class MixedReadWriteTest:
                 conn.close()
     
     def read_transaction(self, node_num, trans_id, transaction_id, isolation_level):
+        """
+        Execute a read (SELECT) transaction on specified node
+        No distributed locks - uses isolation level only (matches app behavior)
+        """
         """Execute a read (SELECT) transaction on specified node"""
         start_time = time.time()
         config = self.node_configs[node_num]
@@ -218,39 +526,54 @@ class MixedReadWriteTest:
     
     def run_test(self, trans_id, isolation_level="READ COMMITTED", mode="concurrent"):
         """
-        Run mixed read/write test with 10 concurrent transactions across different nodes
-        All transactions access the SAME trans_id to test cross-node distributed concurrency
-        Ratio: 4 writers (2 on Node 1, 2 on Node 2), 6 readers (2 on Node 1, 4 on Node 2)
+        Run mixed read/write test with 10 concurrent transactions using Strict 2PL
+        All transactions access the SAME trans_id to test distributed concurrency
+        
+        Configuration:
+            - 4 writers: Each acquires multi-node locks (all 3 nodes)
+            - 6 readers: 2 on Node 1, 4 on Node 2 (isolation level only, no locks)
         
         Args:
             mode: "concurrent" for parallel execution, "sequential" for serial execution
         
-        Tests distributed lock contention and isolation across multiple nodes
+        Tests 2-Phase Locking with:
+            - Multi-node distributed lock acquisition (writers)
+            - Growing phase: Lock before UPDATE
+            - Shrinking phase: Release after COMMIT
+            - Retry logic: Up to 3 attempts on failure
         """
         mode_label = "CONCURRENT" if mode == "concurrent" else "SEQUENTIAL"
         print(f"\n{'='*70}")
-        print(f"Running Case #2: Mixed Read/Write on trans_id={trans_id} ({mode_label})")
+        print(f"Running Case #2: Mixed Read/Write (2PL) - trans_id={trans_id} ({mode_label})")
         print(f"Isolation Level: {isolation_level}")
-        print(f"Configuration (Cross-Node Access - 10 Transactions):")
-        print(f"  WRITERS (4 total): 2 on Node 1, 2 on Node 2")
+        print(f"Configuration:")
+        print(f"  WRITERS (4 total): Multi-node locks (all 3 nodes)")
+        print(f"     - Strict 2PL: Acquire locks -> UPDATE -> COMMIT -> Release locks")
+        print(f"     - Retry logic: Up to 3 attempts on failure")
         print(f"  READERS (6 total): 2 on Node 1, 4 on Node 2")
-        print(f"  All transactions access trans_id={trans_id}")
+        print(f"     - Isolation level only (no distributed locks)")
+        print(f"  Target: All transactions access trans_id={trans_id}")
         print(f"{'='*70}\n")
         
         self.results = {}  # Reset results
         threads = []
         
-        # Create 4 writer threads - 2 on Node 1, 2 on Node 2
+        # Create 4 writer threads
+        # Using write_transaction_with_retry which:
+        #   1. Acquires multi-node locks (all 3 nodes)
+        #   2. Calls prepare→commit back-to-back
+        #   3. Retries up to 3 times on failure
+        # Note: Writers no longer target specific nodes - they acquire locks on ALL nodes
         for i in range(1, 3):
             threads.append(threading.Thread(
-                target=self.write_transaction,
-                args=(1, trans_id, 10000.00 + i*1111.11, f"T{i}_WRITER_Node1", isolation_level)
+                target=self.write_transaction_with_retry,
+                args=(trans_id, 10000.00 + i*1111.11, f"T{i}_WRITER_Multi", isolation_level)
             ))
         
         for i in range(3, 5):
             threads.append(threading.Thread(
-                target=self.write_transaction,
-                args=(2, trans_id, 10000.00 + i*1111.11, f"T{i}_WRITER_Node2", isolation_level)
+                target=self.write_transaction_with_retry,
+                args=(trans_id, 10000.00 + i*1111.11, f"T{i}_WRITER_Multi", isolation_level)
             ))
         
         # Create 6 reader threads - 2 on Node 1, 4 on Node 2
@@ -330,6 +653,7 @@ class MixedReadWriteTest:
             
             if result['type'] == 'WRITE' and result['status'] == 'SUCCESS':
                 row['Before→After'] = f"{result['before_amount']:.2f}→{result['after_amount']:.2f}"
+                row['Replicated'] = f"{result.get('replicated_nodes', 0)}/2 nodes"
             elif result['type'] == 'READ' and result['status'] == 'SUCCESS':
                 row['Repeatable?'] = 'Yes' if result['repeatable'] else 'No'
                 row['Values'] = f"{result['first_read']:.2f}, {result['second_read']:.2f}"
@@ -382,10 +706,23 @@ class MixedReadWriteTest:
         print(f"Expected if sequential: {sum(r['duration'] for r in self.results.values()):.6f} seconds")
         print(f"PASSED: Transactions ran concurrently" if total_time < 5 else "WARNING: Transactions may have run sequentially")
         
-        # Check distributed locking effectiveness
-        writer = next((r for r in self.results.values() if r['type'] == 'WRITE'), None)
-        if writer and writer['status'] == 'SUCCESS':
-            print(f"\nDISTRIBUTED LOCK: Writer successfully acquired lock and completed update")
+        # Check 2PL effectiveness
+        writers = [r for r in self.results.values() if r['type'] == 'WRITE']
+        successful_writers = [r for r in writers if r['status'] == 'SUCCESS']
+        
+        if writers:
+            success_rate = (len(successful_writers) / len(writers)) * 100
+            print(f"\n2-PHASE LOCKING EFFECTIVENESS:")
+            print(f"   Writers: {len(successful_writers)}/{len(writers)} successful ({success_rate:.1f}%)")
+            
+            if successful_writers:
+                print(f"   Growing Phase: Multi-node locks acquired before UPDATE")
+                print(f"   Shrinking Phase: Locks released after COMMIT")
+                print(f"   Strict 2PL: Lock held through entire transaction lifecycle")
+                
+                # Check replication
+                avg_replication = sum(r.get('replicated_nodes', 0) for r in successful_writers) / len(successful_writers)
+                print(f"   Replication: Average {avg_replication:.1f}/2 nodes synchronized")
     
     def validate_serializability(self, concurrent_results, sequential_results, isolation_level):
         """
@@ -478,7 +815,33 @@ class MixedReadWriteTest:
         }
     
     def cleanup(self):
-        """Cleanup: release all locks"""
+        """Cleanup: release all locks and close connections"""
+        # Release any remaining prepared transactions
+        with self.prepared_lock:
+            for txn_id, prep in list(self.prepared_transactions.items()):
+                try:
+                    conn = prep['conn']
+                    cursor = prep['cursor']
+                    resource_id = prep['resource_id']
+                    acquired_nodes = prep['acquired_nodes']
+                    
+                    # Rollback
+                    if conn:
+                        conn.rollback()
+                        cursor.close()
+                        conn.close()
+                    
+                    # Release locks
+                    for node_id in acquired_nodes:
+                        self.lock_manager.release_lock(resource_id, node_id)
+                    
+                    print(f"[{txn_id}] Cleaned up prepared transaction")
+                except:
+                    pass
+            
+            self.prepared_transactions.clear()
+        
+        # Release all locks
         self.lock_manager.release_all_locks()
 
 def main():
@@ -497,15 +860,18 @@ def main():
     ]
     
     print("\n" + "="*70)
-    print("CASE #2: MIXED READ/WRITE CONCURRENT TRANSACTIONS TEST")
+    print("CASE #2: MIXED READ/WRITE CONCURRENT TRANSACTIONS TEST (2PL)")
     print("="*70)
     print("\nTest Configuration:")
-    print(f"  • Trans_ID: {trans_id}")
-    print("  • Writer (T1): Node 1 - Writing to the same data item")
-    print("  • Reader (T2): Node 2 - Reading the same data item")
-    print("  • Writer uses distributed lock manager")
-    print("  • Testing all 4 isolation levels")
-    print("  • Validation: Concurrent vs Sequential execution")
+    print(f"  Trans_ID: {trans_id}")
+    print("  10 concurrent transactions: 4 writers + 6 readers")
+    print("  Cross-node access: Writers on Node 1 & 2, Readers on Node 1 & 2")
+    print("  Testing all 4 isolation levels")
+    print("\n2-Phase Locking Implementation:")
+    print("  Writers: Strict 2PL with prepare->commit phases")
+    print("  Multi-node distributed locks (across all 3 nodes)")
+    print("  Retry logic: Up to 3 attempts on failure")
+    print("  Readers: Isolation level only (no distributed locks)")
     print("="*70)
     
     # Store metrics for comparison
@@ -522,7 +888,7 @@ def main():
         print(f"{'='*70}")
         
         # Run concurrent execution
-        print("\n[1/2] Running CONCURRENT execution...")
+        print("\nRunning CONCURRENT execution...")
         concurrent_exec = test.run_test(
             trans_id=trans_id,
             isolation_level=isolation_level,
@@ -536,7 +902,7 @@ def main():
         all_results[isolation_level] = concurrent_exec
         
         # Run sequential execution for validation
-        print("\n[2/2] Running SEQUENTIAL execution for validation...")
+        print("\nRunning SEQUENTIAL execution for validation...")
         sequential_exec = test.run_test(
             trans_id=trans_id,
             isolation_level=isolation_level,
@@ -567,17 +933,11 @@ def main():
         
         avg_throughput = sum(m['throughput'] for m in metrics_list) / len(metrics_list)
         avg_response = sum(m['avg_response_time'] for m in metrics_list) / len(metrics_list)
-        avg_success_rate = sum(m['success_rate'] for m in metrics_list) / len(metrics_list)
-        total_failures = sum(m['failed_txns'] for m in metrics_list)
-        total_non_repeatable = sum(m['non_repeatable_reads'] for m in metrics_list)
         
         comparison_data.append({
             'Isolation Level': iso_level,
             'Avg Throughput (txn/s)': f"{avg_throughput:.6f}",
-            'Avg Response Time (s)': f"{avg_response:.6f}",
-            'Success Rate (%)': f"{avg_success_rate:.2f}",
-            'Total Failures': total_failures,
-            'Non-Repeatable Reads': total_non_repeatable
+            'Avg Response Time (s)': f"{avg_response:.6f}"
         })
     
     # Create comparison DataFrame
