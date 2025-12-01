@@ -18,6 +18,7 @@ from python.utils.server_ping import NodePinger
 
 # Import page modules
 import python.gui.view_transactions as view_transactions
+import python.gui.view_reports as view_reports
 import python.gui.add_transaction as add_transaction
 import python.gui.update_transaction as update_transaction
 import python.gui.delete_transaction as delete_transaction
@@ -74,7 +75,8 @@ page = st.sidebar.radio(
         "View Transactions",
         "Add Transaction",
         "Update Transaction",
-        "Delete Transaction"
+        "Delete Transaction",
+        "View Reports"
         # "Transaction Log",
         # "Test Case #1"
     ]
@@ -163,6 +165,9 @@ def main():
 
     elif page == "Delete Transaction":
         delete_transaction.render(get_node_for_account, log_transaction)
+
+    elif page == "View Reports":
+        view_reports.render()
 
     # elif page == "Transaction Log":
     #     transaction_log.render()
